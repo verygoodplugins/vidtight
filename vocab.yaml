@@ -1,0 +1,27 @@
+# Default vocabulary for vidtight.
+#
+#   canonical term: [commonly misheard variants]
+#
+# Matching ignores case and punctuation and keeps trailing punctuation and
+# possessives ("Auto Mem's," -> "AutoMem's,"). A fuzzy pass also catches near
+# misses of the canonical terms themselves. Add your own terms here, or keep a
+# private list (names, client projects) in `vocab.personal.yaml` (git-ignored)
+# and pass it with `--vocab vocab.personal.yaml`.
+GravityKit: [Gravity Kit, gravity kit]
+GravityView: [Gravity View]
+TrustedLogin: [Trusted Login]
+WP Fusion: [WP fusion, W P Fusion, WP Fushion]
+AutoMem: [Auto Mem, auto mem, automem]
+AutoHub: [Auto Hub, auto hub]
+AutoJack: [Auto Jack]
+LifterLMS: [Lifter LMS]
+Freemius: [Freemeus, Free Mius]
+Very Good Plugins: [very good plugins]
+EchoDash: [Echo Dash, echo dash, Eco Dash]
+PressConf: [Press Conf, Press Conference, PressConference]
+DataKit: [Data Kit]
+CapCut: [Cap Cut]
+Codex: []
+Claude Code: [Cloud Code, Clod Code]
+Content Control: []
+Suno: [suno, Sueno, Soono]

@@ -1,0 +1,36 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# macOS
+.DS_Store
+
+# Local work: scratch runs, fixtures and tool output (can be many GB)
+runs/
+test/
+*.vidtight/
+
+# Backups and superseded versions
+*.bak
+*.bak-*
+*.v1.py
+
+# Personal vocabulary (keep brand terms in vocab.yaml; names stay local)
+vocab.personal.yaml
+
+# Media and intermediates never belong in git
+*.mp4
+*.mov
+*.m4a
+*.wav
+*.aiff
+*.s16
