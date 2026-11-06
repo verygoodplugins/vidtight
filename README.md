@@ -52,7 +52,7 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-Installing in editable mode gives you the `vidtight` command and keeps the bundled `vocab.yaml` next to the script. You can also run the script directly: `python vidtight.py recording.mov`.
+Installing in editable mode gives you the `vidtight` command and keeps the bundled `vocab.yaml` next to the script. A regular (non-editable) install ships only `vidtight.py`, so it runs without the default vocabulary; pass your own with `--vocab`. You can also run the script directly: `python vidtight.py recording.mov`.
 
 ## Usage
 
@@ -115,7 +115,7 @@ start,end,type,detail
 | `--retake-words N` | `5` | Minimum repeated words to call a retake |
 | `--cut-i-mean` | off | Also cut "I mean" as a filler |
 | `--snap SECONDS` | `0.08` | Edge snap window to the quietest frame (`0` = off) |
-| `--vocab FILE` | `vocab.yaml` beside the script | Vocabulary corrections |
+| `--vocab FILE` | `vocab.yaml` beside the script, if present | Vocabulary corrections |
 | `--edits FILE` | none | Manual edits (see below) |
 | `--model ID` | `mlx-community/parakeet-tdt-0.6b-v3` | Parakeet model |
 | `--reuse` | off | Reuse the cached `words.json` |

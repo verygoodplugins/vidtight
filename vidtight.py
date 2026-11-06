@@ -48,6 +48,7 @@ def apply_vocab(words, vocab):
     for canon, variants in vocab.items():
         for v in [canon] + list(variants or []):
             table.append((tuple(norm(x) for x in v.split()), canon))
+    if not table: return []  # empty vocab: nothing to fix (the fuzzy pass below needs at least one term)
     fixes = []
     i = 0
     while i < len(words):
@@ -260,7 +261,7 @@ def render_video(src, keep, out, fps, bitrate, tail=0.0, fade=0.0, chunk=300.0, 
 def main():
     sys.stdout.reconfigure(line_buffering=True)
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("src"); p.add_argument("--vocab", default=str(Path(__file__).with_name("vocab.yaml")))
+    p.add_argument("src"); p.add_argument("--vocab", help="vocabulary YAML (default: vocab.yaml next to vidtight.py, if present)")
     p.add_argument("--pause", type=float, default=0.8, help="cut silences longer than this (s)")
     p.add_argument("--pad", type=float, default=0.15, help="keep this much air around speech (s)")
     p.add_argument("--mincut", type=float, default=0.25); p.add_argument("--retake-words", type=int, default=5, help="min repeated words to call a retake")
@@ -288,7 +289,8 @@ def main():
     else:
         words, asr_t = transcribe(src, work, a.model); tj.write_text(json.dumps(words))
         print(f"ASR: {a.dur:.1f}s audio in {asr_t:.1f}s ({a.dur / asr_t:.0f}x realtime)")
-    fixes = apply_vocab(words, yaml.safe_load(open(a.vocab)) or {})
+    vf = Path(a.vocab).expanduser() if a.vocab else Path(__file__).with_name("vocab.yaml")  # the bundled default is absent in a non-editable install
+    fixes = apply_vocab(words, (yaml.safe_load(vf.read_text()) or {}) if a.vocab or vf.exists() else {})
     rms = load_rms(a.wav)
     cuts = fix_fillers(find_cuts(words, a), rms)
     # manual edits
