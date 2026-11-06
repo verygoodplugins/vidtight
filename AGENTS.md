@@ -30,7 +30,8 @@ ruff check .
 - Never parse tool output with `eval`; use `fractions.Fraction` or `json`.
 - `vocab.yaml` is a public default holding product/brand terms only. Personal
   names and private project names go in the git-ignored `vocab.personal.yaml`
-  (pass it with `--vocab`).
+  (pass it with `--vocab`). The default is optional at runtime: a non-editable
+  install has no `vocab.yaml` beside the module, so `main()` must not require it.
 - Never commit media, run directories, virtualenvs, transcripts or generated
   outputs. They routinely contain absolute local paths and private speech.
 - Use Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:` ...). PR titles
@@ -42,11 +43,30 @@ ruff check .
 ```text
 vidtight.py     CLI + pipeline (ASR, cuts, EDL, SRT, render)
 vocab.yaml      Default vocabulary corrections (brand/product terms)
-tests/          Unit tests for the pure pipeline logic
-.github/        CI, security, PR-title and Dependabot automation
+tests/          Pipeline logic tests plus stubbed-I/O and CLI-run tests (no media needed)
+.github/        CI, security, release, PR-title and Dependabot automation
 ```
 
 ## Releases
 
-Releases are tag-driven, not managed by Release Please. Update `CHANGELOG.md`,
-then create and push a version tag such as `v0.1.0`.
+Releases are tag-driven, not managed by Release Please. Bump `version` in
+`pyproject.toml`, update `CHANGELOG.md`, then create and push a matching tag such
+as `v0.1.0`. `.github/workflows/release.yml` checks the tag against the version,
+builds the sdist and wheel and creates a GitHub Release. Nothing is published to
+PyPI.
+
+## Repository metadata
+
+Keep the GitHub description and topics in sync with `pyproject.toml`. This is not
+an MCP server, so it does not carry the `mcp` / `mcp-server` topics or a
+`server.json`.
+
+- Description: `Local screen-recording tightener: parakeet-mlx ASR, filler/pause/retake cuts, vocab fix, EDL + SRT + ffmpeg render.`
+- Topics: `video-editing`, `screen-recording`, `speech-to-text`, `asr`, `parakeet`,
+  `mlx`, `apple-silicon`, `macos`, `ffmpeg`, `subtitles`, `srt`, `cli`, `python`
+
+```bash
+gh repo edit verygoodplugins/vidtight \
+  --description "Local screen-recording tightener: parakeet-mlx ASR, filler/pause/retake cuts, vocab fix, EDL + SRT + ffmpeg render." \
+  --add-topic video-editing,screen-recording,speech-to-text,asr,parakeet,mlx,apple-silicon,macos,ffmpeg,subtitles,srt,cli,python
+```

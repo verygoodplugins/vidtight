@@ -22,10 +22,21 @@ test/
 # Backups and superseded versions
 *.bak
 *.bak-*
-*.v1.py
+*.v1.*
+*.v1
 
 # Personal vocabulary (keep brand terms in vocab.yaml; names stay local)
 vocab.personal.yaml
+
+# Secrets and local config
+.env
+.env.*
+
+# Transcripts, edit lists and captions contain private speech and local paths
+words.json
+edl.json
+cuts.csv
+*.srt
 
 # Media and intermediates never belong in git
 *.mp4
