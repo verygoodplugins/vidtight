@@ -41,6 +41,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      # pip-audit scans everything installed, including the runner's own pip
+      # and setuptools. Upgrade them first so an old runner image doesn't fail
+      # the audit on tooling vidtight never ships.
+      - name: Upgrade runner tooling
+        run: python -m pip install --upgrade pip setuptools wheel
+
       - name: Install pip-audit
         run: pip install pip-audit
 
