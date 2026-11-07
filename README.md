@@ -7,6 +7,12 @@
 
 **Local screen-recording tightener.** vidtight transcribes your recording on-device with [parakeet-mlx](https://github.com/senstella/parakeet-mlx), cuts the ums, dead air, stutters and retakes, fixes mis-heard product names, and hands you an edit decision list, a retimed SRT and (optionally) a rendered MP4. No cloud upload, no timeline dragging.
 
+<video src="https://github.com/user-attachments/assets/60ecdbd2-0931-40e6-919a-03a2b780f4f3"></video>
+
+<p align="center">
+  <sub>Overview of vidtight, rendered with Remotion using simulated sample data and generated background music.</sub>
+</p>
+
 ## How it works
 
 ```text
