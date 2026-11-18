@@ -36,6 +36,7 @@ vocab.personal.yaml
 words.json
 edl.json
 cuts.csv
+select.csv
 *.srt
 
 # Media and intermediates never belong in git

@@ -6,6 +6,11 @@
 recordings: parakeet-mlx ASR → filler/stutter/retake/pause cuts → vocabulary
 fix → EDL + SRT + ffmpeg render. It runs on macOS / Apple Silicon.
 
+`--select` is the opposite entry point: keep only the windows around listed
+moments, every edge in a speech gap (`speech_blocks` → `speech_gaps` →
+`select_moments` → `check_edl`), then the same render path. Keep those four
+usable as plain functions: the mode is meant to be a step in a larger pipeline.
+
 ## Common commands
 
 ```bash
@@ -37,6 +42,10 @@ ruff check .
 - Use Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:` ...). PR titles
   are linted.
 - Before opening a change, run `pytest` and `ruff check .`.
+- A speech-safety claim is only as good as the transcript. Parakeet in 120 s
+  chunks drops whole lines when music runs under the voice (`--select` defaults
+  to 30 s). When you cannot listen, re-transcribe the rendered cut and compare
+  it with the words the EDL keeps before calling a cut clean.
 
 ## Layout
 
