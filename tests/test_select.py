@@ -92,7 +92,14 @@ def test_gaps_are_graded_clean_tight_or_not_cuttable():
     words = say("Auto", 1.0) + say("Jack.", 1.46) + say("Hi there.", 2.0) + say("Bye.", 4.0)  # 0.16 s mid-name, 0.24 s after a sentence, 1.4 s
     _, gaps = gaps_for(words)
     grades = [(round(g["e"] - g["s"], 2), g["grade"]) for g in gaps]
-    assert grades == [(1.0, "clean"), (0.16, None), (0.24, "tight"), (0.0, None), (1.4, "clean"), (55.7, "clean")]
+    # ASR word times drift by more than a short gap is wide (measured: 0.39 s early to 0.17 s late), so ASR-only gaps under 0.4 s never count.
+    assert grades == [(1.0, "clean"), (0.16, None), (0.24, None), (0.0, None), (1.4, "clean"), (55.7, "clean")]
+
+
+def test_a_gap_under_the_preferred_width_counts_only_between_two_caller_intervals():
+    _, gaps = gaps_for(say("Bye.", 4.0), speech=[[1.0, 1.76, "Auto Jack."], [2.0, 2.6, "Hi there."], [3.7, 3.8, "Oh."]])
+    grades = [(round(g["e"] - g["s"], 2), g["grade"]) for g in gaps]
+    assert grades == [(1.0, "clean"), (0.24, "tight"), (1.1, "clean"), (0.2, None), (55.7, "clean")]  # app|app is tight; app|ASR word is not
 
 
 def test_gap_spans_keep_the_pads_and_split_narrow_gaps_pro_rata():
@@ -143,13 +150,23 @@ def test_a_moment_is_dropped_rather_than_trimmed_below_half_its_window():
     assert clips == [] and row["status"] == "dropped"
 
 
+LINES = [[12.0, 12.9, "Take a light."], [13.2, 14.1, "Raise it higher."]]  # the same two lines as exact intervals from the app
+RUN_ON = WORDS[:4] + say("and then some more words follow on.", 14.1)  # speech carries straight on after "higher."
+
+
 def test_tight_gaps_are_taken_only_when_they_save_more_than_a_second_of_movement():
-    # The out-edge is wanted at 13.6, inside "Raise it higher." The tight gap (0.3 s, after "light.") offers 13.03: 0.57 s away.
+    # The out-edge is wanted at 13.6, inside "Raise it higher." The tight gap (0.3 s, between the app's two lines) offers 13.03: 0.57 s away.
     moment = [{"t": 12.1, "label": "raise", "pre": 0.5, "post": 1.5}]
-    clean_close, _ = pick(moment)  # the clean gap after "higher." is 0.65 s away: not worth a tight gap
-    clean_far, _ = pick(moment, words=WORDS[:10] + say("and then some more words follow on.", 14.1))  # the line runs on: the clean gap is now 2.75 s away
+    clean_close, _ = pick(moment, speech=LINES)  # the clean gap after "higher." is 0.65 s away: not worth a tight gap
+    clean_far, _ = pick(moment, words=RUN_ON, speech=LINES)  # the clean gap is now 2.75 s away
     assert clean_close == [[11.6, pytest.approx(14.25)]]
     assert clean_far == [[11.6, pytest.approx(12.9 + 0.3 * 0.15 / 0.35)]]
+
+
+def test_a_short_gap_seen_only_by_the_asr_is_never_used():
+    # Same timings, but from ASR words alone: the 0.3 s gap after "light." may not be where the ASR says it is.
+    clips, _ = pick([{"t": 12.1, "label": "raise", "pre": 0.5, "post": 1.5}], words=WORDS[:10] + RUN_ON[4:])
+    assert clips == [[11.6, pytest.approx(16.35)]]  # runs to the clean gap after "on." instead
 
 
 def test_a_mid_sentence_gap_is_never_used_even_when_it_is_the_nearest():
@@ -214,7 +231,7 @@ def test_snap_with_a_limit_cannot_eat_into_the_pads():
     assert v.snap([[9.8, 11.35, 1]], rms, 0.08) == [[pytest.approx(9.85), pytest.approx(11.28), 1]]  # plain snap chases the dips toward the words
     (s, e, _), = v.snap([[9.8, 11.35, 1]], rms, 0.08, lim)
     assert 9.77 <= s <= 9.8 and e == pytest.approx(11.35)  # fenced: the edge may only move away from speech
-    pinned = 12.9 + 0.3 * 0.15 / 0.35  # a tight gap offers a single point
+    pinned = 12.9 + 0.3 * 0.15 / 0.35  # a gap narrower than both pads offers a single point
     assert v.snap([[pinned, 20.0, 1]], rms, 0.08, lim)[0][0] == pytest.approx(pinned)
 
 
@@ -244,6 +261,24 @@ def test_selection_never_leaves_an_edge_inside_speech_on_random_transcripts():
             if r["clip"]:
                 s, e, _ = keep[r["clip"] - 1]
                 assert s - 0.15 <= r["t"] <= e + 0.15  # the moment itself is still in its clip (snap and frame rounding move an edge by up to 0.1 s)
+
+
+def test_selection_between_exact_app_lines_stays_speech_safe_on_random_timelines():
+    rng = random.Random(11)
+    for _ in range(100):
+        t, speech = rng.uniform(0, 3), []
+        for i in range(rng.randint(2, 25)):
+            e = t + rng.uniform(0.4, 4.0)
+            speech.append([round(t, 3), round(e, 3), f"line {i}"])
+            t = e + rng.choice([0.05, 0.16, 0.2, 0.3, 0.38, 0.5, 2.0, 6.0])
+        dur, fps = t + rng.uniform(0, 5), rng.choice([24, 30, 60])
+        blocks = v.speech_blocks([], speech)
+        gaps = v.speech_gaps(blocks, dur, tail=0.15 + 0.5 / fps, floor=v.MINPAD + 0.5 / fps)
+        clips, _ = v.select_moments([{"t": rng.uniform(0, dur), "label": str(i)} for i in range(rng.randint(1, 8))], gaps, blocks, dur)
+        lim = lambda x: next(((g["lo"], g["hi"]) for g in gaps if g["s"] <= x <= g["e"]), (x, x))  # noqa: E731
+        keep = v.quantize(v.snap([[i, o, 1] for i, o in clips], np.ones(int(dur * 100) + 1), 0.08, lim), fps)
+        bad = [e for e in v.check_edl(keep, blocks, dur) if not e["safe"]]
+        assert not bad, (speech, bad)
 
 
 # --- frame rate --------------------------------------------------------------------------------

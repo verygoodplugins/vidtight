@@ -14,7 +14,7 @@ LEAD = 0.0  # seconds of title card prepended (set by --leadin)
 
 # --select edge rules
 MINPAD, MAXPAD = 0.03, 0.2  # an edge sits 30-200 ms from the nearest word; under 30 ms counts as unsafe
-TIGHT = 1.0  # a tight gap (narrower than --gap) is used only when it saves this many seconds of edge movement over a clean one
+TIGHT = 1.0  # a tight gap (narrower than --gap, between two exact --speech intervals) is used only when it saves this many seconds of edge movement over a clean one
 KEEPMIN = 0.5  # drop a moment rather than keep less than this share of the window it asked for
 JOIN = 0.5  # clips closer together than this are merged into one
 
@@ -246,15 +246,15 @@ def utterances(blocks, gap=0.4):
 
 def speech_gaps(blocks, dur, gap=0.4, mingap=0.15, tail=0.15, lead=MAXPAD, floor=MINPAD):
     """The gap before each block and after the last, each {s, e, prev, next, grade, lo, hi}. grade is "clean" (gap s or more, or open to the start or
-    end of the file), "tight" (mingap s or more, and only after a sentence end or beside a caller interval: a short gap mid-sentence is an ASR
-    artefact, not a pause) or None (not cuttable). An edge may sit anywhere in [lo, hi]: tail s after the word before the gap and lead s before the
-    word after it (ASR stamps word starts late). A gap narrower than tail + lead gets one point, the two pads scaled to fit, neither under floor."""
+    end of the file), "tight" (mingap s or more, and only between two caller intervals: ASR word times drift by more than a tight gap is wide, so a
+    short gap seen only by the ASR cannot be trusted) or None (not cuttable). An edge may sit anywhere in [lo, hi]: tail s after the word before the
+    gap and lead s before the word after it (ASR can stamp a start late). A narrower gap gets one point, the pads scaled to fit, neither under floor."""
     out, end, prev = [], 0.0, None
     for b in [*blocks, None]:
         s = max(end, dur if b is None else b["s"]); w = s - end
         if prev is None or b is None: grade, lo, hi = "clean", (0.0 if prev is None else min(s, end + min(tail, w))), (s if b is None else max(end, s - min(lead, w)))
         else:
-            grade = "clean" if w >= gap - 1e-9 else "tight" if w >= mingap - 1e-9 and (prev["eos"] or "app" in (prev["src"], b["src"])) else None
+            grade = "clean" if w >= gap - 1e-9 else "tight" if w >= mingap - 1e-9 and prev["src"] == b["src"] == "app" else None
             lo, hi = (end + tail, s - lead) if w >= tail + lead else (end + min(max(w * tail / (tail + lead), floor), w - floor),) * 2
         out.append({"s": end, "e": s, "prev": prev, "next": b, "grade": grade, "lo": lo, "hi": hi})
         if b and b["e"] >= end: end, prev = b["e"], b
@@ -463,7 +463,8 @@ def main():
     p.add_argument("--speech", help="--select: exact speech intervals [[start, end, label], ...] logged by the app; they replace the ASR words they overlap")
     p.add_argument("--pre", type=float, default=1.0, help="--select: seconds kept before each moment"); p.add_argument("--post", type=float, default=4.0, help="--select: seconds kept after each moment")
     p.add_argument("--max-clip", type=float, default=12.0, help="--select: longest a clip may grow to take an utterance whole (s)")
-    p.add_argument("--gap", type=float, default=0.4, help="--select: preferred speech gap (s)"); p.add_argument("--min-gap", type=float, default=0.15, help="--select: smallest usable gap, sentence ends only (s)")
+    p.add_argument("--gap", type=float, default=0.4, help="--select: smallest speech gap an edge may use (s)")
+    p.add_argument("--min-gap", type=float, default=0.15, help="--select: smallest gap usable between two exact --speech intervals (s)")
     p.add_argument("--max-word", type=float, default=1.2, help="--select: longest a single word can last; longer ASR stamps are cut back (s)")
     p.add_argument("--strict", action="store_true", help="--select: exit 2 if any edge of the final EDL is not speech-safe")
     a = p.parse_args()

@@ -14,8 +14,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
   speech moves outward to take the line whole (up to `--max-clip`) or inward to
   the nearest gap. A moment that fits neither way is dropped and reported.
 - Edge rules for `--select`: never inside a word, gaps of 0.4 s or more
-  preferred (`--gap`), 0.15 to 0.4 s gaps only at sentence ends (`--min-gap`),
-  pads of 30-200 ms that snapping and frame rounding cannot eat.
+  (`--gap`), 0.15 to 0.4 s gaps only between two exact `--speech` intervals
+  (`--min-gap`), pads of 30-200 ms that snapping and frame rounding cannot eat.
+  ASR-only tight gaps are out: checked against an app's own voice-line times,
+  parakeet word starts ran 0.39 s early to 0.17 s late, and a 0.26 s gap placed
+  from them put an edge 16 ms into the next line.
 - `--speech FILE`: exact `[start, end, label]` speech intervals from the app.
   They replace the ASR words they overlap.
 - `--words FILE`: use an existing transcript instead of running ASR.
