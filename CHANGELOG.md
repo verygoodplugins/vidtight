@@ -19,6 +19,12 @@ project adheres to [Semantic Versioning](https://semver.org/).
   ASR-only tight gaps are out: checked against an app's own voice-line times,
   parakeet word starts ran 0.39 s early to 0.17 s late, and a 0.26 s gap placed
   from them put an edge 16 ms into the next line.
+- `--air SECONDS` for `--select`: keeps that much voice-free footage at every
+  edge next to speech where the pause is long enough, puts the edge mid-pause
+  where it is not, and joins clips less than twice that apart. Tight gaps are
+  off with it. Cuts made right on the pads are safe but read as one line after
+  another: on the test capture `--air 1 --gap 0.8` took the shortest voice-free
+  stretch across a cut from about 1 s to 2.6 s.
 - `--speech FILE`: exact `[start, end, label]` speech intervals from the app.
   They replace the ASR words they overlap.
 - `--words FILE`: use an existing transcript instead of running ASR.

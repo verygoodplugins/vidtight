@@ -200,6 +200,44 @@ def test_per_moment_pre_and_post_override_the_defaults_and_bad_times_are_dropped
     assert "outside" in rows[1]["note"]
 
 
+# --- air ---------------------------------------------------------------------------------------
+
+PAUSED = [[10.0, 12.0, "one"], [15.0, 17.0, "two"], [17.9, 19.0, "three"]]  # a 3 s pause, then a 0.9 s pause
+
+
+def test_air_keeps_voice_free_footage_at_each_edge_where_the_pause_allows():
+    gaps = v.speech_gaps(v.speech_blocks([], PAUSED), DUR, air=1.0)
+    spans = [(round(g["lo"], 3), round(g["hi"], 3)) for g in gaps]
+    # a second clear of speech where the pause has room for it on both sides, the middle of the pause where it does not
+    assert spans == [(0.0, 9.0), (13.0, 14.0), (17.45, 17.45), (20.0, DUR)]
+    assert [g["grade"] for g in gaps] == ["clean"] * 4
+
+
+def test_air_turns_tight_gaps_off():
+    lines = [[10.0, 12.0, "one"], [12.3, 14.0, "two"]]
+    grade = lambda **kw: v.speech_gaps(v.speech_blocks([], lines), DUR, **kw)[1]["grade"]  # noqa: E731
+    assert grade() == "tight" and grade(air=1.0) is None  # a 0.3 s gap cannot give any air
+
+
+def test_with_air_a_clip_starts_and_ends_in_voice_free_footage():
+    blocks = v.speech_blocks([], PAUSED)
+    moment = [{"t": 11.0, "label": "mid-line", "pre": 0.5, "post": 0.5}]
+    tight, _ = v.select_moments(moment, v.speech_gaps(blocks, DUR), blocks, DUR)
+    aired, _ = v.select_moments(moment, v.speech_gaps(blocks, DUR, air=1.0), blocks, DUR)
+    assert tight == [[pytest.approx(9.8), pytest.approx(12.15)]]  # right on the pads: the line and nothing else
+    assert aired == [[9.0, 13.0]]
+
+
+def test_clips_closer_than_the_join_distance_keep_the_pause_between_them():
+    blocks = v.speech_blocks([], PAUSED)
+    gaps = v.speech_gaps(blocks, DUR, air=1.0)
+    moments = [{"t": 11.0, "label": "a", "pre": 0.5, "post": 0.5}, {"t": 16.0, "label": "b", "pre": 0.5, "post": 0.5}]
+    apart, _ = v.select_moments(moments, gaps, blocks, DUR)
+    joined, rows = v.select_moments(moments, gaps, blocks, DUR, join=2.0)
+    assert apart == [[9.0, 13.0], [14.0, 17.45]]  # a 1 s jump inside one pause
+    assert joined == [[9.0, 17.45]] and [r["clip"] for r in rows] == [1, 1]  # the whole pause stays in instead
+
+
 # --- self-check --------------------------------------------------------------------------------
 
 
@@ -288,9 +326,10 @@ def test_selection_between_exact_app_lines_stays_speech_safe_on_random_timelines
             speech.append([round(t, 3), round(e, 3), f"line {i}"])
             t = e + rng.choice([0.05, 0.16, 0.2, 0.3, 0.38, 0.5, 2.0, 6.0])
         dur, fps = rng.choice([speech[-1][1], speech[-1][1] + 0.02, t + rng.uniform(0, 5)]), rng.choice([24, 30, 60])  # sometimes the last line runs to the end
+        air = rng.choice([0, 0, 0.5, 1.0, 2.5])
         blocks = v.speech_blocks([], speech)
-        gaps = v.speech_gaps(blocks, dur, tail=0.15 + 0.5 / fps, floor=v.MINPAD + 0.5 / fps)
-        clips, _ = v.select_moments([{"t": rng.uniform(0, dur), "label": str(i)} for i in range(rng.randint(1, 8))], gaps, blocks, dur)
+        gaps = v.speech_gaps(blocks, dur, tail=0.15 + 0.5 / fps, floor=v.MINPAD + 0.5 / fps, air=air)
+        clips, _ = v.select_moments([{"t": rng.uniform(0, dur), "label": str(i)} for i in range(rng.randint(1, 8))], gaps, blocks, dur, join=max(v.JOIN, 2 * air))
         keep = v.settle(clips, gaps, np.ones(int(dur * 100) + 1), 0.08, fps, dur)
         bad = [e for e in v.check_edl(keep, blocks, dur) if not e["safe"]]
         assert not bad, (speech, bad)
@@ -391,6 +430,15 @@ def test_main_select_reads_caller_speech_intervals(stub_media, monkeypatch, tmp_
     out = run_select(monkeypatch, tmp_path, "- {t: 20.0, label: quiet bit}\n", "--speech", str(tmp_path / "speech.yaml"), "--snap", "0")
     (s, e, _), = json.loads((out / "edl.json").read_text())["keep"]
     assert s == pytest.approx(18.3) and e == pytest.approx(24.0)  # in-edge moved out of the app's line
+
+
+def test_main_select_air_leaves_room_around_the_line_and_joins_near_clips(stub_media, monkeypatch, tmp_path):
+    (tmp_path / "speech.yaml").write_text('- [18.5, 21.0, "app line"]\n')
+    moments = "- {t: 20.0, label: mid-line}\n- {t: 26.8, label: soon after}\n"
+    args = ["--speech", str(tmp_path / "speech.yaml"), "--snap", "0"]
+    keep = lambda *extra: json.loads((run_select(monkeypatch, tmp_path, moments, *args, *extra) / "edl.json").read_text())["keep"]  # noqa: E731
+    assert keep() == [[pytest.approx(18.3), 24.0, 1], [25.8, 30.8, 1]]  # in-edge on its pad before the line, two clips
+    assert keep("--air", "1") == [[17.5, pytest.approx(31.6), 1]]  # a second of air before the line and after "The end.", and the 1.8 s between the clips stays in
 
 
 def test_main_select_warns_loudly_and_strict_exits_nonzero_when_an_edge_is_inside_speech(stub_media, monkeypatch, tmp_path, capsys):
