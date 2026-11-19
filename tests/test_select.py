@@ -363,6 +363,20 @@ def test_main_select_writes_an_edl_in_the_existing_schema_and_a_select_csv(stub_
     assert (out / "words.json").exists()
 
 
+def test_main_select_maps_speech_from_the_raw_words_not_the_vocabulary_merged_ones(stub_media, monkeypatch, tmp_path):
+    # The vocabulary fix merges three 0.6 s words into one 1.8 s span. Capped as a single word it would end at 11.2, mid-"Plugin", and the
+    # gap that opened there would take the out-edge. The speech map has to see the three words as transcribed.
+    words = say("Very Good Plugin today.", 10.0, wlen=0.6)
+    (tmp_path / "vocab.yaml").write_text("Very Good Plugins: [Very Good Plugin]\n")
+    out = run_select(monkeypatch, tmp_path, "- {t: 10.4, label: brand, pre: 0.4, post: 0.8}\n", "--vocab", str(tmp_path / "vocab.yaml"), "--snap", "0", words=words)
+    edl = json.loads((out / "edl.json").read_text())
+    (s, e, _), = edl["keep"]
+    assert s == pytest.approx(9.8) and e == pytest.approx(12.4 + 0.15 + 1 / 60, abs=1e-3)  # the whole line, not 11.37 inside "Plugin"
+    assert all(x["safe"] for x in v.check_edl(edl["keep"], v.speech_blocks(words), DUR))
+    assert [f["to"] for f in edl["vocab_fixes"]] == ["Very Good Plugins"]
+    assert "Very Good Plugins today." in (out / "clip.srt").read_text()  # captions still get the correction
+
+
 def test_main_select_says_plainly_when_the_speech_map_is_low_confidence(stub_media, monkeypatch, tmp_path, capsys):
     words = say("Poke it and it", 30.0) + [{"w": "pops.", "s": 31.2, "e": 36.0, "eos": True}]
     run_select(monkeypatch, tmp_path, "- {t: 34.9, label: bells}\n", words=words)

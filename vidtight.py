@@ -332,12 +332,14 @@ def settle(clips, gaps, rms, win, fps, dur):
         if c[1] >= dur - 1e-6: k[1] = dur
     return keep
 
-def select_edl(a, words, rms, fps):
-    """--select: keep-segments around the wanted moments. Returns (keep, cuts, sel); sel carries the per-moment rows, the speech map and caption words."""
+def select_edl(a, raw, words, rms, fps):
+    """--select: keep-segments around the wanted moments. Returns (keep, cuts, sel); sel carries the per-moment rows, the speech map and caption words.
+    The speech map is built from raw, the words as transcribed: vocabulary fixes merge several words into one span, which the per-word length cap
+    would then cut short. words (vocabulary applied) only feed the captions."""
     y = yaml.safe_load(Path(a.select).expanduser().read_text()) or []
     speech = (yaml.safe_load(Path(a.speech).expanduser().read_text()) or []) if a.speech else []
     sil = [(s0, a.dur if e0 is None else e0) for s0, e0 in silences(a.wav, a.noise, 0.3)]
-    blocks = speech_blocks(words, speech, sil, a.max_word); hf = 0.5 / fps  # half a frame of slack so frame quantising cannot eat a pad
+    blocks = speech_blocks(raw, speech, sil, a.max_word); hf = 0.5 / fps  # half a frame of slack so frame quantising cannot eat a pad
     gaps = speech_gaps(blocks, a.dur, a.gap, max(a.min_gap, 0.12), min(max(a.pad, MINPAD), MAXPAD) + hf, MAXPAD, MINPAD + hf)
     clips, rows = select_moments(y.get("moments", []) if isinstance(y, dict) else y, gaps, blocks, a.dur, a.pre, a.post, a.max_clip)
     keep = settle(clips, gaps, rms, a.snap, fps, a.dur)
@@ -352,7 +354,7 @@ def select_edl(a, words, rms, fps):
         k = r["clip"] - 1; r["in"], r["out"] = keep[k][:2]
         for side, e in (("in", edges[2 * k]), ("out", edges[2 * k + 1])): r[side + "_safe"], r[side + "_why"] = e["safe"], e["why"]
     asked = check_edl([[*r["want"], 1] for r in rows if 0 <= r["t"] <= a.dur], blocks, a.dur, a.gap)
-    capw = [{**w, "e": min(w["e"], w["s"] + wordcap(w["w"], a.max_word))} for w in words]  # captions must not ride a smeared word into another clip
+    capw = [{**w, "e": min(w["e"], w["s"] + wordcap(w["w"], a.max_word) * len(w["w"].split()))} for w in words]  # captions must not ride a smeared word into another clip
     return keep, cuts, {"rows": rows, "blocks": blocks, "utts": utterances(blocks, a.gap), "words": capw, "asked": asked, "sil": len(sil)}
 
 def report_select(a, work, sel):
@@ -494,10 +496,11 @@ def main():
         print(f"ASR: {a.dur:.1f}s audio in {asr_t:.1f}s ({a.dur / asr_t:.0f}x realtime)")
     if not a.wav.exists(): wav16k(src, a.wav)  # --words or --reuse into a fresh --out dir
     vf = Path(a.vocab).expanduser() if a.vocab else Path(__file__).with_name("vocab.yaml")  # the bundled default is absent in a non-editable install
+    raw = [dict(w) for w in words]  # --select maps speech from the stamps as transcribed, before vocabulary fixes merge words
     fixes = apply_vocab(words, (yaml.safe_load(vf.read_text()) or {}) if a.vocab or vf.exists() else {})
     rms = load_rms(a.wav)
     speed, sel = [], None
-    if a.select: keep, cuts, sel = select_edl(a, words, rms, fps)
+    if a.select: keep, cuts, sel = select_edl(a, raw, words, rms, fps)
     else:
         cuts = fix_fillers(find_cuts(words, a), rms)
         # manual edits
