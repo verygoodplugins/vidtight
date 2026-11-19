@@ -1,6 +1,6 @@
 <!--
   Title format: <type>[(<scope>)]: <summary>  — scope is optional.
-  Examples: fix: retry on 429 · feat(server): add list_users tool
+  Examples: fix: keep a cut edge out of a spoken line · feat: add breathing room around a select cut
   See https://www.conventionalcommits.org
 -->
 

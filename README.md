@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/brand/derived/github-social-1280x640.png" alt="vidtight: low-poly shears cutting an amber waveform. Tighten the take." width="1280" />
+</p>
+
 # vidtight
 
 [![CI](https://github.com/verygoodplugins/vidtight/actions/workflows/ci.yml/badge.svg)](https://github.com/verygoodplugins/vidtight/actions/workflows/ci.yml)

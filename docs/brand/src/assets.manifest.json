@@ -1,0 +1,12 @@
+{
+  "assets": [
+    {
+      "source": "github-social.html",
+      "output": "../derived/github-social-1280x640.png",
+      "width": 1280,
+      "height": 640,
+      "selector": ".canvas",
+      "maxBytes": 2500000
+    }
+  ]
+}

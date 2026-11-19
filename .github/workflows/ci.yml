@@ -8,13 +8,20 @@ on:
   merge_group:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
 jobs:
   test:
     name: Python CI
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -31,15 +38,12 @@ jobs:
 
       # vidtight.py deliberately uses a compact one-statement-per-line style, so
       # we lint with ruff but do not enforce `ruff format --check`.
+      # ruff, pytest and pytest-cov come from the dev extra above.
       - name: Lint with ruff
-        run: |
-          pip install ruff
-          ruff check .
+        run: ruff check .
 
       - name: Test with pytest
-        run: |
-          pip install pytest pytest-cov
-          pytest --cov=vidtight --cov-report=xml
+        run: pytest --cov=vidtight --cov-report=xml
 
       - name: Upload coverage
         uses: codecov/codecov-action@a99c28d3f0da835de33ff2feb2e15691c7b9641f # v7

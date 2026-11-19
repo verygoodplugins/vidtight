@@ -52,6 +52,7 @@ ruff check .
 ```text
 vidtight.py     CLI + pipeline (ASR, cuts, EDL, SRT, render)
 vocab.yaml      Default vocabulary corrections (brand/product terms)
+docs/brand/     GitHub card: masters, HTML type, derived 1280×640 PNG
 tests/          Pipeline logic tests plus stubbed-I/O and CLI-run tests (no media needed)
 .github/        CI, security, release, PR-title and Dependabot automation
 ```
