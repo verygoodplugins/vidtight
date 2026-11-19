@@ -7,6 +7,8 @@
 
 **Local screen-recording tightener.** vidtight transcribes your recording on-device with [parakeet-mlx](https://github.com/senstella/parakeet-mlx), cuts the ums, dead air, stutters and retakes, fixes mis-heard product names, and hands you an edit decision list, a retimed SRT and (optionally) a rendered MP4. No cloud upload, no timeline dragging.
 
+It also runs the other way round. [`--select`](#selecting-moments---select) keeps only the moments you list and never cuts through a spoken line.
+
 <video src="https://github.com/user-attachments/assets/60ecdbd2-0931-40e6-919a-03a2b780f4f3"></video>
 
 <p align="center">
@@ -74,6 +76,9 @@ vidtight recording.mov --render --pause 0.6 --leadin title.mp4 --edits edits.yam
 
 # Re-tune cuts or vocabulary without re-running ASR
 vidtight recording.mov --reuse --retake-words 4
+
+# Keep only the listed moments, every edge in a speech gap (see "Selecting moments")
+vidtight capture.mp4 --select moments.yaml --render
 ```
 
 Outputs land in `<source name>.vidtight/` next to the source (override with `--out`):
@@ -125,6 +130,16 @@ start,end,type,detail
 | `--edits FILE` | none | Manual edits (see below) |
 | `--model ID` | `mlx-community/parakeet-tdt-0.6b-v3` | Parakeet model |
 | `--reuse` | off | Reuse the cached `words.json` |
+| `--words FILE` | none | Use this `words.json` instead of running ASR |
+| `--chunk SECONDS` | `120`, or `30` with `--select` | ASR chunk length. Long chunks drop whole lines when music runs under the voice |
+| `--select FILE` | none | Moments to keep (see [Selecting moments](#selecting-moments---select)). The options below apply to this mode |
+| `--speech FILE` | none | Exact `[start, end, label]` speech intervals from the app. They replace overlapping ASR words |
+| `--pre SECONDS` / `--post SECONDS` | `1` / `4` | Window kept before and after each moment |
+| `--max-clip SECONDS` | `12` | Longest a clip may grow to take a spoken line whole |
+| `--gap SECONDS` | `0.4` | Smallest speech gap an edge may use |
+| `--min-gap SECONDS` | `0.15` | Smallest gap usable between two exact `--speech` intervals |
+| `--max-word SECONDS` | `1.2` | Longest a single word can last. Longer ASR stamps are cut back |
+| `--strict` | off | Exit 2 if any edge of the final EDL is not speech-safe |
 | `--bitrate RATE` | `16M` | Video bitrate for the render |
 | `--leadin FILE` | none | Pre-encoded title-card clip (same size, fps and codec) to prepend |
 | `--fadein SECONDS` | `0` | Fade the first footage in from black |
@@ -159,6 +174,79 @@ music:                          # optional music bed
   slam_src: 120.0               # source time where it rises from the ducked level to full
   duck_db: -19
 ```
+
+## Selecting moments (`--select`)
+
+The tighten mode removes what you don't want. `--select` works the other way round: hand it a list of moments and it keeps a window around each one, puts every edge in a gap between spoken lines, and renders through the same path (edge snap, frame grid, sample-exact audio joins).
+
+It exists because of a trailer that was cut on gameplay timestamps alone. Half the window edges landed inside narration.
+
+```bash
+vidtight capture.mp4 --select moments.yaml --out /tmp/capture.select --render
+```
+
+```yaml
+# moments.yaml: times are source seconds
+- {t: 14.5, label: "room asleep, title"}
+- {t: 24.4, label: "takes an orb", pre: 0.5, post: 3}    # per-moment window
+- {t: 109.8, label: "supernova", caption: "Supernova"}    # caption lands in the SRT over that clip
+```
+
+Each moment asks for `t - pre` to `t + post` (`--pre 1`, `--post 4` unless the moment says otherwise).
+
+### Where the edges go
+
+1. **Speech map.** Built from the word-level transcript as transcribed (vocabulary fixes only touch the captions). With `--select` the ASR runs in 30 s chunks (`--chunk`) instead of 120 s. On a 160 s Quest capture with music under the narration, 120 s chunks heard 107 words and dropped 12 whole lines. 30 s chunks heard 169.
+2. **Word ends.** Parakeet stamps a word until the next one starts, so the last word of a line swallows the pause after it. Each word end is cut back to the first `silencedetect` pause inside it. With music under the voice there is no such pause, and the word is capped at 0.3 s plus 0.1 s per letter (never more than `--max-word`). A capped end is an estimate, and the report counts them.
+3. **App-logged speech.** `--speech FILE` takes exact `[start, end, label]` intervals (YAML or JSON) from an app that logs its own voice lines. They replace the ASR words they overlap and are never cut.
+4. **Gaps.** 0.4 s or more (`--gap`) is a clean gap. A tight gap of 0.15 to 0.4 s (`--min-gap`) only counts between two `--speech` intervals, because ASR timings can't place one. On the test capture, parakeet's word starts ran from 0.39 s early to 0.17 s late against the app's own voice-line times, and a 0.26 s gap placed from them put an edge 16 ms into the next line. Between exact intervals a tight gap is still taken only when it saves more than a second of edge movement over a clean one.
+5. **Moving an edge.** An edge that lands in speech moves to a gap. Outward takes the line whole, and the clip may grow to `--max-clip`. Inward trims the window, never below half of what was asked for. The cheapest pair of moves wins. When nothing fits, the moment is dropped and the report says why.
+6. **Pads.** An edge sits `--pad` after a word (0.15 s, clamped to 30-200 ms) and 200 ms before one, since parakeet stamps word starts late. A gap too narrow for both pads splits the room pro rata, never under 30 ms a side. Snapping still looks for the quietest frame, but it can't leave the gap or eat a pad.
+
+Clips closer than 0.5 s are merged, and clips always come out in source order.
+
+### What you get
+
+| File | What it is |
+| --- | --- |
+| `edl.json` | Same schema as the tighten mode. `keep` holds the clips and `cuts` the unselected ranges, plus `select` (one entry per moment) and `speech` (the utterances) |
+| `select.csv` | One row per moment: status (`kept`, `widened`, `trimmed`, `dropped`, `+merged`), clip number, in, out, whether each edge is speech-safe and why, what moved, and the speech the clip contains |
+| `<name>.srt` | The spoken words inside the clips plus any moment captions, retimed |
+
+After writing `edl.json`, vidtight reads it back and checks every edge against the speech map:
+
+```text
+select: 9 moments -> 8 clips (3 as asked, 6 widened, 0 trimmed, 2 merged, 0 dropped)
+as asked, 9 of 18 window edges were inside speech
+self-check: 16 edges re-read from edl.json: 0 inside speech, 0 under 30 ms from a word, 0 in tight gaps (under 0.4s), 8 rest on an estimated word end
+```
+
+The first two numbers should be zero. If they aren't, a warning goes to stderr, and with `--strict` vidtight exits 2 before rendering.
+
+### Limits
+
+- **The check is only as good as the transcript.** An edge inside speech the ASR never heard passes it. When the report says `LOW CONFIDENCE`, listen to the cut, or log the lines in the app and pass `--speech`.
+- Music or room tone under the voice hides the pauses from `silencedetect`, so word ends there are estimates from the length cap.
+- ASR-only cuts run long, because only gaps of 0.4 s or more count. The same nine moments gave 58.5 s from ASR alone and 44.2 s with the app's exact `--speech` intervals.
+- Clips play in source order. Reordering for story is the caller's job.
+- The recording's own music is cut with the picture, so a bed jumps at every join.
+- No filler or pause cuts run inside the clips, and `--edits` only applies `replace` and `music`.
+- A moment that sits mid-line gets the whole line or is dropped. Raise `--max-clip` to keep long lines.
+
+### As a library step
+
+The pieces are plain functions, so a pipeline can call them without the CLI:
+
+```python
+import vidtight as v
+
+blocks = v.speech_blocks(words, speech=app_lines)            # words.json list, [[start, end, label], ...]
+gaps = v.speech_gaps(blocks, dur)
+clips, rows = v.select_moments(moments, gaps, blocks, dur)   # [[in, out], ...] and one dict per moment
+unsafe = [e for e in v.check_edl([[i, o, 1] for i, o in clips], blocks, dur) if not e["safe"]]
+```
+
+`check_edl` takes any keep list, so it can also vet an EDL another tool made.
 
 ## Development
 
