@@ -182,6 +182,12 @@ The tighten mode removes what you don't want. `--select` works the other way rou
 
 It exists because of a trailer that was cut on gameplay timestamps alone. Half the window edges landed inside narration.
 
+<video src="https://github.com/user-attachments/assets/7ede0d65-85bc-4a5c-9f53-e9e94c5956ce"></video>
+
+<p align="center">
+  <sub>A 160 s headset capture cut to 63 s by <code>--select --air 1 --gap 0.8</code> around nine listed moments, with the app's own voice-line times passed as <code>--speech</code>. No edge falls inside a spoken line. The recording's own music jumps at the joins.</sub>
+</p>
+
 ```bash
 vidtight capture.mp4 --select moments.yaml --out /tmp/capture.select --render
 
