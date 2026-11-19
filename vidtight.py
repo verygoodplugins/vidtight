@@ -16,7 +16,7 @@ LEAD = 0.0  # seconds of title card prepended (set by --leadin)
 MINPAD, MAXPAD = 0.03, 0.2  # an edge sits 30-200 ms from the nearest word; under 30 ms counts as unsafe
 TIGHT = 1.0  # a tight gap (narrower than --gap, between two exact --speech intervals) is used only when it saves this many seconds of edge movement over a clean one
 KEEPMIN = 0.5  # drop a moment rather than keep less than this share of the window it asked for
-JOIN = 0.5  # clips closer together than this are merged into one
+JOIN = 0.5  # clips closer together than this are merged into one (twice --air when that is larger)
 
 def sh(cmd): return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
 
@@ -244,27 +244,31 @@ def utterances(blocks, gap=0.4):
         else: out.append({"s": b["s"], "e": b["e"], "text": b["w"], "est": int(b["src"] == "cap")})
     return out
 
-def speech_gaps(blocks, dur, gap=0.4, mingap=0.15, tail=0.15, lead=MAXPAD, floor=MINPAD):
+def speech_gaps(blocks, dur, gap=0.4, mingap=0.15, tail=0.15, lead=MAXPAD, floor=MINPAD, air=0.0):
     """The gap before each block and after the last, each {s, e, prev, next, grade, lo, hi}. grade is "clean" (gap s or more, or open to the start or
     end of the file), "tight" (mingap s or more, and only between two caller intervals: ASR word times drift by more than a tight gap is wide, so a
     short gap seen only by the ASR cannot be trusted) or None (not cuttable). An edge may sit anywhere in [lo, hi]: tail s after the word before the
-    gap and lead s before the word after it (ASR can stamp a start late). A narrower gap gets one point, the pads scaled to fit, neither under floor."""
+    gap and lead s before the word after it (ASR can stamp a start late). A narrower gap gets one point, the pads scaled to fit, neither under floor.
+    air asks for breathing room: every edge stays air s clear of speech where the pause is long enough and sits mid-pause where it is not, and
+    tight gaps are off, since they have no room to give."""
     out, end, prev = [], 0.0, None
     for b in [*blocks, None]:
-        s = max(end, dur if b is None else b["s"]); w = s - end
-        if prev is None or b is None: grade, lo, hi = "clean", (0.0 if prev is None else min(s, end + min(tail, w))), (s if b is None else max(end, s - min(lead, w)))
+        s = max(end, dur if b is None else b["s"]); w = s - end; a = min(air, w / 2)
+        if prev is None or b is None: grade, lo, hi = "clean", (0.0 if prev is None else min(s, end + min(max(tail, air), w))), (s if b is None else max(end, s - min(max(lead, air), w)))
         else:
-            grade = "clean" if w >= gap - 1e-9 else "tight" if w >= mingap - 1e-9 and prev["src"] == b["src"] == "app" else None
-            lo, hi = (end + tail, s - lead) if w >= tail + lead else (end + min(max(w * tail / (tail + lead), floor), w - floor),) * 2
+            grade = "clean" if w >= gap - 1e-9 else "tight" if air <= 0 and w >= mingap - 1e-9 and prev["src"] == b["src"] == "app" else None
+            lo, hi = end + max(tail, a), s - max(lead, a)
+            if lo > hi + 1e-9: lo = hi = end + min(max(w * tail / (tail + lead), floor), w - floor)
+            else: hi = max(lo, hi)
         out.append({"s": end, "e": s, "prev": prev, "next": b, "grade": grade, "lo": lo, "hi": hi})
         if b and b["e"] >= end: end, prev = b["e"], b
     return out
 
-def select_moments(moments, gaps, blocks, dur, pre=1.0, post=4.0, maxclip=12.0):
+def select_moments(moments, gaps, blocks, dur, pre=1.0, post=4.0, maxclip=12.0, join=JOIN):
     """A keep-window around each moment {t, label, pre?, post?, caption?} with both edges in a usable speech gap. A requested edge that lands in speech
     moves to a gap: outward takes the utterance whole (the clip may grow to maxclip), inward trims the window (never below KEEPMIN of it). The cheapest
     pair of moves wins, a tight gap costing TIGHT s extra; when no pair fits the moment is dropped. Returns (clips, rows): clips are [in, out] in source
-    order, overlapping and near-touching ones merged; rows, one per moment in the caller's order, say what was done and why."""
+    order, overlapping ones and ones less than join s apart merged; rows, one per moment in the caller's order, say what was done and why."""
     use = [g for g in gaps if g["grade"]]
     said = lambda x0, x1: " ".join(b["w"] for b in blocks if x0 <= (b["s"] + b["e"]) / 2 <= x1)  # speech a clip contains
     hit = lambda x0, x1: shorten(" ".join(b["w"] for b in blocks if b["s"] < x1 and x0 < b["e"]), 44)  # speech an edge moved across
@@ -291,7 +295,7 @@ def select_moments(moments, gaps, blocks, dur, pre=1.0, post=4.0, maxclip=12.0):
         r.update({"in": i, "out": o, "note": "; ".join(notes), "status": "+".join(k for k, c in (("widened", wid), ("trimmed", trim)) if c) or "kept"})
     clips = []
     for r in sorted((r for r in rows if r["in"] is not None), key=lambda r: r["in"]):
-        if clips and r["in"] <= clips[-1][1] + JOIN: clips[-1][1] = max(clips[-1][1], r["out"])
+        if clips and r["in"] <= clips[-1][1] + join: clips[-1][1] = max(clips[-1][1], r["out"])
         else: clips.append([r["in"], r["out"]])
         r["clip"] = len(clips)
     for r in rows:
@@ -340,8 +344,8 @@ def select_edl(a, raw, words, rms, fps):
     speech = (yaml.safe_load(Path(a.speech).expanduser().read_text()) or []) if a.speech else []
     sil = [(s0, a.dur if e0 is None else e0) for s0, e0 in silences(a.wav, a.noise, 0.3)]
     blocks = speech_blocks(raw, speech, sil, a.max_word); hf = 0.5 / fps  # half a frame of slack so frame quantising cannot eat a pad
-    gaps = speech_gaps(blocks, a.dur, a.gap, max(a.min_gap, 0.12), min(max(a.pad, MINPAD), MAXPAD) + hf, MAXPAD, MINPAD + hf)
-    clips, rows = select_moments(y.get("moments", []) if isinstance(y, dict) else y, gaps, blocks, a.dur, a.pre, a.post, a.max_clip)
+    gaps = speech_gaps(blocks, a.dur, a.gap, max(a.min_gap, 0.12), min(max(a.pad, MINPAD), MAXPAD) + hf, MAXPAD, MINPAD + hf, max(a.air, 0.0))
+    clips, rows = select_moments(y.get("moments", []) if isinstance(y, dict) else y, gaps, blocks, a.dur, a.pre, a.post, a.max_clip, max(JOIN, 2 * a.air))
     keep = settle(clips, gaps, rms, a.snap, fps, a.dur)
     cuts, t0 = [], 0.0
     for s, e, _ in keep:
@@ -476,6 +480,7 @@ def main():
     p.add_argument("--max-clip", type=float, default=12.0, help="--select: longest a clip may grow to take an utterance whole (s)")
     p.add_argument("--gap", type=float, default=0.4, help="--select: smallest speech gap an edge may use (s)")
     p.add_argument("--min-gap", type=float, default=0.15, help="--select: smallest gap usable between two exact --speech intervals (s)")
+    p.add_argument("--air", type=float, default=0.0, help="--select: voice-free footage kept at every edge next to speech, where the pause is long enough (s). Clips less than twice this apart are joined")
     p.add_argument("--max-word", type=float, default=1.2, help="--select: longest a single word can last; longer ASR stamps are cut back (s)")
     p.add_argument("--strict", action="store_true", help="--select: exit 2 if any edge of the final EDL is not speech-safe")
     a = p.parse_args()

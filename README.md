@@ -138,6 +138,7 @@ start,end,type,detail
 | `--max-clip SECONDS` | `12` | Longest a clip may grow to take a spoken line whole |
 | `--gap SECONDS` | `0.4` | Smallest speech gap an edge may use |
 | `--min-gap SECONDS` | `0.15` | Smallest gap usable between two exact `--speech` intervals |
+| `--air SECONDS` | `0` | Voice-free footage kept at every edge next to speech, where the pause is long enough. Joins clips less than twice this apart |
 | `--max-word SECONDS` | `1.2` | Longest a single word can last. Longer ASR stamps are cut back |
 | `--strict` | off | Exit 2 if any edge of the final EDL is not speech-safe |
 | `--bitrate RATE` | `16M` | Video bitrate for the render |
@@ -183,6 +184,9 @@ It exists because of a trailer that was cut on gameplay timestamps alone. Half t
 
 ```bash
 vidtight capture.mp4 --select moments.yaml --out /tmp/capture.select --render
+
+# With room to breathe around the lines (see "Air" below)
+vidtight capture.mp4 --select moments.yaml --speech speech.json --air 1 --gap 0.8 --render
 ```
 
 ```yaml
@@ -203,7 +207,9 @@ Each moment asks for `t - pre` to `t + post` (`--pre 1`, `--post 4` unless the m
 5. **Moving an edge.** An edge that lands in speech moves to a gap. Outward takes the line whole, and the clip may grow to `--max-clip`. Inward trims the window, never below half of what was asked for. The cheapest pair of moves wins. When nothing fits, the moment is dropped and the report says why.
 6. **Pads.** An edge sits `--pad` after a word (0.15 s, clamped to 30-200 ms) and 200 ms before one, since parakeet stamps word starts late. A gap too narrow for both pads splits the room pro rata, never under 30 ms a side. Snapping still looks for the quietest frame, but it can't leave the gap or eat a pad.
 
-Clips closer than 0.5 s are merged, and clips always come out in source order.
+7. **Air.** By default an edge sits on its pad, right against the line. That suits a tight cut. In a trailer it means one line ends, the next begins, and nothing breathes. `--air 1` keeps a second of voice-free footage at every edge next to speech where the pause is long enough, and puts the edge mid-pause where it isn't. Clips that end up less than twice that apart are joined, so a natural pause stays in instead of becoming a jump. Tight gaps are off with `--air`. Raise `--gap` with it (0.8 worked on the test capture), or short pauses inside a paragraph still get cut.
+
+Clips closer than 0.5 s (or twice `--air`) are merged, and clips always come out in source order.
 
 ### What you get
 
@@ -228,6 +234,7 @@ The first two numbers should be zero. If they aren't, a warning goes to stderr, 
 - **The check is only as good as the transcript.** An edge inside speech the ASR never heard passes it. When the report says `LOW CONFIDENCE`, listen to the cut, or log the lines in the app and pass `--speech`.
 - Music or room tone under the voice hides the pauses from `silencedetect`, so word ends there are estimates from the length cap.
 - ASR-only cuts run long, because only gaps of 0.4 s or more count. The same nine moments gave 58.5 s from ASR alone and 44.2 s with the app's exact `--speech` intervals.
+- A cut made right on the pads is safe and can still feel rushed. On the test capture the shortest voice-free stretch across a cut was about 1 s. With `--air 1 --gap 0.8` it was 2.6 s, in five clips instead of eight (62.8 s, about half of it voice-free).
 - Clips play in source order. Reordering for story is the caller's job.
 - The recording's own music is cut with the picture, so a bed jumps at every join.
 - No filler or pause cuts run inside the clips, and `--edits` only applies `replace` and `music`.
