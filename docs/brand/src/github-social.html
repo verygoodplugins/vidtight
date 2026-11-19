@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>vidtight — GitHub social preview</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      html,
+      body {
+        background: #0e0a07;
+      }
+      .canvas {
+        width: 1280px;
+        height: 640px;
+        position: relative;
+        overflow: hidden;
+        background: #0e0a07 url("../masters/banner-scene.jpg") 100% 42% / cover
+          no-repeat;
+        font-family:
+          "Avenir Next", "Segoe UI", "Helvetica Neue", Helvetica, Arial,
+          sans-serif;
+        color: #f6f1e7;
+      }
+      .shade {
+        position: absolute;
+        inset: 0;
+        background:
+          linear-gradient(
+            90deg,
+            rgba(14, 10, 7, 0.94) 0%,
+            rgba(14, 10, 7, 0.78) 32%,
+            rgba(14, 10, 7, 0.28) 50%,
+            rgba(14, 10, 7, 0) 66%
+          ),
+          linear-gradient(
+            180deg,
+            rgba(14, 10, 7, 0.28) 0%,
+            rgba(14, 10, 7, 0) 22%,
+            rgba(14, 10, 7, 0) 78%,
+            rgba(14, 10, 7, 0.4) 100%
+          );
+      }
+      .copy {
+        position: relative;
+        z-index: 1;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        padding: 0 0 8px 88px;
+        max-width: 680px;
+      }
+      .kicker {
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        font-size: 18px;
+        letter-spacing: 0.18em;
+        text-transform: none;
+        color: #e8a85a;
+        margin-bottom: 18px;
+      }
+      h1 {
+        font-size: 84px;
+        font-weight: 650;
+        letter-spacing: -0.035em;
+        line-height: 0.95;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="canvas" data-render-asset>
+      <div class="shade"></div>
+      <div class="copy">
+        <div class="kicker">vidtight</div>
+        <h1>Tighten the take</h1>
+      </div>
+    </div>
+  </body>
+</html>

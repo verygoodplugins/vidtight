@@ -8,6 +8,9 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- GitHub card and README hero: low-poly shears cutting an amber waveform,
+  kicker `vidtight`, headline "Tighten the take". No byline. Pack lives in
+  `docs/brand/`.
 - `--select moments.yaml`: moment-selection mode. Keeps a window around each
   listed moment (`{t, label, pre?, post?, caption?}`) and puts every edge in a
   speech gap, then renders through the existing path. An edge that lands in
