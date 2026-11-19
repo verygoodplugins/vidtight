@@ -213,6 +213,23 @@ def test_check_edl_counts_edges_inside_speech_and_explains_each_edge():
     assert start["safe"] and start["why"] == "file start" and end["safe"] and end["why"] == "file end"
 
 
+def test_check_edl_exempts_only_the_exact_file_boundaries():
+    blocks = v.speech_blocks([], [[9, 10, "last line"]])
+    (_, short), (_, exact) = v.check_edl([[8, 9.96, 1]], blocks, 10), v.check_edl([[8, 10, 1]], blocks, 10)
+    assert not short["safe"] and short["inside"] and 'inside "last line"' in short["why"]  # 40 ms short of the end still cuts the line
+    assert exact["safe"] and exact["why"] == "file end"
+
+
+def test_a_clip_that_runs_to_the_end_of_the_file_is_not_rounded_back_into_the_last_word():
+    blocks = v.speech_blocks([], [[9.5, 10.01, "last line"]])  # speech runs to the end of a 10.01 s file: 10.01 is not on the 30 fps grid
+    gaps = v.speech_gaps(blocks, 10.01)
+    clips, _ = v.select_moments([{"t": 9.7, "label": "ending", "pre": 0.3, "post": 0.3}], gaps, blocks, 10.01)
+    keep = v.settle(clips, gaps, np.ones(1001), 0.08, 30, 10.01)
+    (s, e, _), = keep
+    assert 9.2 <= s <= 9.3 and e == 10.01  # plain rounding would put the out-edge at 10.0, inside the line
+    assert all(e["safe"] for e in v.check_edl(keep, blocks, 10.01))
+
+
 def test_check_edl_marks_edges_that_rest_on_an_estimated_word_end():
     words = say("it", 30.9) + [{"w": "pops.", "s": 31.2, "e": 36.0, "eos": True}] + say("Each one.", 42.8)
     blocks = v.speech_blocks(words)
@@ -252,8 +269,7 @@ def test_selection_never_leaves_an_edge_inside_speech_on_random_transcripts():
         moments = [{"t": rng.uniform(0, dur), "label": str(i)} for i in range(rng.randint(1, 8))]
         clips, rows = v.select_moments(moments, gaps, blocks, dur)
         rms = np.array([rng.random() for _ in range(int(dur * 100) + 1)])
-        lim = lambda x: next(((g["lo"], g["hi"]) for g in gaps if g["s"] <= x <= g["e"]), (x, x))  # noqa: E731
-        keep = v.quantize(v.snap([[i, o, 1] for i, o in clips], rms, 0.08, lim), fps)
+        keep = v.settle(clips, gaps, rms, 0.08, fps, dur)
         bad = [e for e in v.check_edl(keep, blocks, dur) if not e["safe"]]
         assert not bad, (words, moments, bad)
         assert len(keep) == len(clips)
@@ -271,12 +287,11 @@ def test_selection_between_exact_app_lines_stays_speech_safe_on_random_timelines
             e = t + rng.uniform(0.4, 4.0)
             speech.append([round(t, 3), round(e, 3), f"line {i}"])
             t = e + rng.choice([0.05, 0.16, 0.2, 0.3, 0.38, 0.5, 2.0, 6.0])
-        dur, fps = t + rng.uniform(0, 5), rng.choice([24, 30, 60])
+        dur, fps = rng.choice([speech[-1][1], speech[-1][1] + 0.02, t + rng.uniform(0, 5)]), rng.choice([24, 30, 60])  # sometimes the last line runs to the end
         blocks = v.speech_blocks([], speech)
         gaps = v.speech_gaps(blocks, dur, tail=0.15 + 0.5 / fps, floor=v.MINPAD + 0.5 / fps)
         clips, _ = v.select_moments([{"t": rng.uniform(0, dur), "label": str(i)} for i in range(rng.randint(1, 8))], gaps, blocks, dur)
-        lim = lambda x: next(((g["lo"], g["hi"]) for g in gaps if g["s"] <= x <= g["e"]), (x, x))  # noqa: E731
-        keep = v.quantize(v.snap([[i, o, 1] for i, o in clips], np.ones(int(dur * 100) + 1), 0.08, lim), fps)
+        keep = v.settle(clips, gaps, np.ones(int(dur * 100) + 1), 0.08, fps, dur)
         bad = [e for e in v.check_edl(keep, blocks, dur) if not e["safe"]]
         assert not bad, (speech, bad)
 
@@ -408,6 +423,24 @@ def test_transcribe_passes_the_chunk_length_to_parakeet(monkeypatch, tmp_path):
     assert seen == {"chunk_duration": 30, "overlap_duration": 5}
     v.transcribe("clip.mov", tmp_path, "some/model")
     assert seen == {"chunk_duration": 120, "overlap_duration": 15}
+
+
+def test_main_select_with_render_reports_an_empty_selection_instead_of_crashing(stub_media, monkeypatch, tmp_path, capsys):
+    def no_render(*a, **k):
+        raise AssertionError("nothing was selected: the renderer must not run")
+
+    monkeypatch.setattr(v, "render_audio", no_render)
+    monkeypatch.setattr(v, "render_video", no_render)
+    (tmp_path / "speech.yaml").write_text(f'- [0, {DUR}, "one unbroken line"]\n')  # no gap anywhere: the only moment has to be dropped
+    with pytest.raises(SystemExit) as exc:
+        run_select(monkeypatch, tmp_path, "- {t: 30.0, label: mid-line}\n", "--speech", str(tmp_path / "speech.yaml"), "--render")
+    assert "nothing to render" in str(exc.value.code) and "select.csv" in str(exc.value.code)
+    out = tmp_path / "out"
+    assert json.loads((out / "edl.json").read_text())["keep"] == []  # the analysis outputs are still written
+    (row,) = csv.DictReader((out / "select.csv").open())
+    assert row["status"] == "dropped" and "--max-clip" in row["note"]
+    assert "select: 1 moments -> 0 clips" in capsys.readouterr().out
+    run_select(monkeypatch, tmp_path, "- {t: 30.0, label: mid-line}\n", "--speech", str(tmp_path / "speech.yaml"))  # analysis only: a normal exit
 
 
 def test_speech_without_select_is_an_error(stub_media, monkeypatch, tmp_path):

@@ -303,13 +303,14 @@ def select_moments(moments, gaps, blocks, dur, pre=1.0, post=4.0, maxclip=12.0):
 def check_edl(keep, blocks, dur, gap=0.4):
     """Re-read every edge of an EDL against the speech map. One dict per edge in keep order: {t, side, safe, inside, tight, est, why}. inside: within a
     word. safe: not inside and at least MINPAD from every word. tight: in a gap narrower than gap. est: safe only if an estimated word end is right,
-    because the ASR stamped that word as still running at t."""
+    because the ASR stamped that word as still running at t. Only the exact start and end of the file are exempt: an edge a few frames short of the
+    end still cuts a line that runs to the end."""
     out = []
     for s, e, *_ in keep:
         for side, x in (("in", s), ("out", e)):
             d = {"t": x, "side": side, "safe": True, "inside": False, "tight": False, "est": False, "why": "file start" if x <= 0.001 else "file end"}
             out.append(d)
-            if x <= 0.001 or x >= dur - 0.05: continue
+            if x <= 0.001 or x >= dur - 0.001: continue
             word = next((b for b in blocks if b["s"] < x < b["e"]), None)
             if word: d.update(safe=False, inside=True, why=f'inside "{word["w"]}" ({word["s"]:.2f}-{word["e"]:.2f})'); continue
             prev, nxt = max((b for b in blocks if b["e"] <= x), key=lambda b: b["e"], default=None), min((b for b in blocks if b["s"] >= x), key=lambda b: b["s"], default=None)
@@ -321,6 +322,16 @@ def check_edl(keep, blocks, dur, gap=0.4):
             d["why"] = ("" if d["safe"] else f"under {MINPAD * 1000:.0f} ms from a word: ") + (f"{ge - gs:.2f}s gap: " if prev and nxt else "") + why
     return out
 
+def settle(clips, gaps, rms, win, fps, dur):
+    """Selected clips -> final keep-segments: snap each edge inside its own gap (pads intact), put it on the frame grid, and leave an edge at the very
+    end of the file there, because rounding it to the grid could pull it back into a last word that runs to the end."""
+    lim = lambda t: next(((g["lo"], g["hi"]) for g in gaps if g["s"] <= t <= g["e"]), (t, t))
+    keep = quantize(snap([[i, o, 1] for i, o in clips], rms, win, lim), fps)
+    if len(keep) != len(clips): sys.exit("vidtight: a selected clip collapsed while snapping; rerun with --snap 0")
+    for k, c in zip(keep, clips):
+        if c[1] >= dur - 1e-6: k[1] = dur
+    return keep
+
 def select_edl(a, words, rms, fps):
     """--select: keep-segments around the wanted moments. Returns (keep, cuts, sel); sel carries the per-moment rows, the speech map and caption words."""
     y = yaml.safe_load(Path(a.select).expanduser().read_text()) or []
@@ -329,9 +340,7 @@ def select_edl(a, words, rms, fps):
     blocks = speech_blocks(words, speech, sil, a.max_word); hf = 0.5 / fps  # half a frame of slack so frame quantising cannot eat a pad
     gaps = speech_gaps(blocks, a.dur, a.gap, max(a.min_gap, 0.12), min(max(a.pad, MINPAD), MAXPAD) + hf, MAXPAD, MINPAD + hf)
     clips, rows = select_moments(y.get("moments", []) if isinstance(y, dict) else y, gaps, blocks, a.dur, a.pre, a.post, a.max_clip)
-    lim = lambda t: next(((g["lo"], g["hi"]) for g in gaps if g["s"] <= t <= g["e"]), (t, t))  # snapping stays inside the gap, pads intact
-    keep = quantize(snap([[i, o, 1] for i, o in clips], rms, a.snap, lim), fps)
-    if len(keep) != len(clips): sys.exit("vidtight: a selected clip collapsed while snapping; rerun with --snap 0")
+    keep = settle(clips, gaps, rms, a.snap, fps, a.dur)
     cuts, t0 = [], 0.0
     for s, e, _ in keep:
         if s - t0 > 1e-6: cuts.append((t0, s, "unselected", ""))
@@ -531,6 +540,7 @@ def main():
     if not sel: print(f"cuts: {by} speed-ups: {len(speed)} vocab fixes: {len(fixes)}")
     print(f"duration: {a.dur:.1f}s -> {outdur:.1f}s edit (+{tail:.1f}s music tail) = {outdur + tail:.1f}s (+{LEAD:.1f}s lead-in), {len(keep)} segments")
     if unsafe and a.strict: print(f"outputs in {work}"); sys.exit(2)
+    if a.render and not keep: sys.exit("vidtight: nothing to render: " + (f"no moment survived the selection (see {work / 'select.csv'})" if sel else "every second was cut"))
     if a.render:
         t = time.time()
         aud, vid, out = work / f"{name}.audio.m4a", work / f"{name}.video.mp4", work / f"{name}.mp4"

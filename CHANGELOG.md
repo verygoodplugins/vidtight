@@ -32,7 +32,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
 - `select.csv` (one row per moment: status, in, out, whether each edge is
   speech-safe and why) and extra `select` / `speech` keys in `edl.json`.
 - Self-check: the EDL is read back from disk and every edge is checked against
-  the speech map. `--strict` exits 2 if any edge is unsafe.
+  the speech map. `--strict` exits 2 if any edge is unsafe. Only the exact start
+  and end of the file are exempt, and a clip that runs to the end of the file
+  keeps its out-edge there instead of being rounded back onto the frame grid.
+- `--select --render` with every moment dropped now says so and exits instead
+  of crashing in the renderer. The analysis outputs are still written.
 - `speech_blocks`, `speech_gaps`, `select_moments` and `check_edl` are plain
   functions, usable as a library step. `tests/test_select.py` covers them with
   synthetic word lists (no ASR), including a 150-transcript random sweep.
