@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """vidtight: local screen-recording tightener. ASR (parakeet-mlx) -> fillers/pauses/retakes -> vocab fix -> EDL -> SRT + ffmpeg render.
---select turns it round: keep only the windows around wanted moments, with every edge in a speech gap."""
-import argparse, csv, difflib, json, re, subprocess, sys, time
+--select turns it round: keep only the windows around wanted moments, with every edge in a speech gap.
+--broll keeps the speech-free windows instead of cutting them as pauses."""
+import argparse, csv, difflib, json, math, re, subprocess, sys, tempfile, time
 from fractions import Fraction
 from pathlib import Path
 import yaml
@@ -265,7 +266,7 @@ def speech_gaps(blocks, dur, gap=0.4, mingap=0.15, tail=0.15, lead=MAXPAD, floor
     return out
 
 def select_moments(moments, gaps, blocks, dur, pre=1.0, post=4.0, maxclip=12.0, join=JOIN):
-    """A keep-window around each moment {t, label, pre?, post?, caption?} with both edges in a usable speech gap. A requested edge that lands in speech
+    """A keep-window around each moment {t, label, pre?, post?, caption?, section?, note?} with both edges in a usable speech gap. A requested edge that lands in speech
     moves to a gap: outward takes the utterance whole (the clip may grow to maxclip), inward trims the window (never below KEEPMIN of it). The cheapest
     pair of moves wins, a tight gap costing TIGHT s extra; when no pair fits the moment is dropped. Returns (clips, rows): clips are [in, out] in source
     order, overlapping ones and ones less than join s apart merged; rows, one per moment in the caller's order, say what was done and why."""
@@ -275,7 +276,8 @@ def select_moments(moments, gaps, blocks, dur, pre=1.0, post=4.0, maxclip=12.0, 
     rows = []
     for m in moments:
         t = float(m["t"]); a0, b0 = max(0.0, t - float(m.get("pre", pre))), min(dur, t + float(m.get("post", post)))
-        r = {"label": str(m.get("label", "")), "t": t, "want": [a0, b0], "status": "dropped", "clip": None, "in": None, "out": None, "note": "", "speech": "", "caption": m.get("caption")}
+        r = {"label": str(m.get("label", "")), "t": t, "want": [a0, b0], "status": "dropped", "clip": None, "in": None, "out": None,
+             "note": "", "speech": "", "caption": m.get("caption"), "section": str(m.get("section") or ""), "shot_note": str(m.get("note") or "")}
         rows.append(r)
         if not 0 <= t <= dur or b0 - a0 < 0.3: r["note"] = "t is outside the recording" if not 0 <= t <= dur else "the window is under 0.3 s"; continue
         cap = max(maxclip, b0 - a0) + 1e-6
@@ -296,6 +298,50 @@ def select_moments(moments, gaps, blocks, dur, pre=1.0, post=4.0, maxclip=12.0, 
     clips = []
     for r in sorted((r for r in rows if r["in"] is not None), key=lambda r: r["in"]):
         if clips and r["in"] <= clips[-1][1] + join: clips[-1][1] = max(clips[-1][1], r["out"])
+        else: clips.append([r["in"], r["out"]])
+        r["clip"] = len(clips)
+    for r in rows:
+        if r["clip"]:
+            r["in"], r["out"] = clips[r["clip"] - 1]; r["speech"] = said(r["in"], r["out"])
+            if sum(x["clip"] == r["clip"] for x in rows) > 1: r["status"] += "+merged"
+    return clips, rows
+
+def windows_of(gaps, minlen):
+    """Speech-free windows from gaps already built by speech_gaps. A file with no speech at all is one window, the whole file, however short:
+    that is the silent hero shot pause-cutting would otherwise eat. Any other gap under minlen is a breath inside chatter, not a shot.
+    lo/hi are the padded edges a cut may sit on; start/end are the speech-free span itself."""
+    out = []
+    for g in gaps:
+        d = g["e"] - g["s"]
+        if d <= 1e-9: continue
+        if not (g["prev"] is None and g["next"] is None) and d < minlen - 1e-9: continue
+        out.append({"start": g["s"], "end": g["e"], "duration": d, "lo": g["lo"], "hi": g["hi"]})
+    return out
+
+def broll_windows(blocks, dur, minlen=0.8, **kw):
+    """Speech-free windows {start, end, duration, lo, hi}. kw is forwarded to speech_gaps (gap, air, the pads)."""
+    return windows_of(speech_gaps(blocks, dur, **kw), minlen)
+
+def select_broll(moments, windows, blocks, dur):
+    """Keep the speech-free windows instead of cutting them. With moments, each one keeps the whole window containing t, so a marked silent shot
+    stays whole instead of shrinking to a pre/post slice. With none, every window is a clip and setup chatter is left out. Rows match select_moments;
+    section and note are the caller's, and note on the row stays the reason an edge moved."""
+    said = lambda x0, x1: " ".join(b["w"] for b in blocks if x0 <= (b["s"] + b["e"]) / 2 <= x1)  # speech a clip contains
+    usable = [w for w in windows if w["hi"] - w["lo"] > 0.05]
+    if not moments: return [[w["lo"], w["hi"]] for w in usable], []
+    rows = []
+    for m in moments:
+        t = float(m["t"])
+        r = {"label": str(m.get("label", "")), "t": t, "want": None, "status": "dropped", "clip": None, "in": None, "out": None,
+             "note": "", "speech": "", "caption": m.get("caption"), "section": str(m.get("section") or ""), "shot_note": str(m.get("note") or "")}
+        rows.append(r)
+        if not 0 <= t <= dur: r["note"] = "t is outside the recording"; continue
+        w = next((w for w in usable if w["start"] - 1e-9 <= t <= w["end"] + 1e-9), None)
+        if not w: r["note"] = "t is inside speech, or the silent gap there is shorter than --pause"; continue
+        r.update({"in": w["lo"], "out": w["hi"], "want": [w["lo"], w["hi"]], "status": "kept"})
+    clips = []
+    for r in sorted((r for r in rows if r["in"] is not None), key=lambda r: r["in"]):
+        if clips and r["in"] <= clips[-1][1] + 1e-6: clips[-1][1] = max(clips[-1][1], r["out"])
         else: clips.append([r["in"], r["out"]])
         r["clip"] = len(clips)
     for r in rows:
@@ -337,15 +383,20 @@ def settle(clips, gaps, rms, win, fps, dur):
     return keep
 
 def select_edl(a, raw, words, rms, fps):
-    """--select: keep-segments around the wanted moments. Returns (keep, cuts, sel); sel carries the per-moment rows, the speech map and caption words.
-    The speech map is built from raw, the words as transcribed: vocabulary fixes merge several words into one span, which the per-word length cap
-    would then cut short. words (vocabulary applied) only feed the captions."""
-    y = yaml.safe_load(Path(a.select).expanduser().read_text()) or []
+    """--select / --broll: keep-segments around the wanted moments, or the speech-free windows. Returns (keep, cuts, sel); sel carries the per-moment
+    rows, the speech map and caption words. The speech map is built from raw, the words as transcribed: vocabulary fixes merge several words into one
+    span, which the per-word length cap would then cut short. words (vocabulary applied) only feed the captions."""
+    moments = []
+    if a.select:
+        y = yaml.safe_load(Path(a.select).expanduser().read_text()) or []
+        moments = y.get("moments", []) if isinstance(y, dict) else y
     speech = (yaml.safe_load(Path(a.speech).expanduser().read_text()) or []) if a.speech else []
     sil = [(s0, a.dur if e0 is None else e0) for s0, e0 in silences(a.wav, a.noise, 0.3)]
     blocks = speech_blocks(raw, speech, sil, a.max_word); hf = 0.5 / fps  # half a frame of slack so frame quantising cannot eat a pad
     gaps = speech_gaps(blocks, a.dur, a.gap, max(a.min_gap, 0.12), min(max(a.pad, MINPAD), MAXPAD) + hf, MAXPAD, MINPAD + hf, max(a.air, 0.0))
-    clips, rows = select_moments(y.get("moments", []) if isinstance(y, dict) else y, gaps, blocks, a.dur, a.pre, a.post, a.max_clip, max(JOIN, 2 * a.air))
+    windows = windows_of(gaps, a.pause) if a.broll else None
+    if a.broll: clips, rows = select_broll(moments, windows, blocks, a.dur)
+    else: clips, rows = select_moments(moments, gaps, blocks, a.dur, a.pre, a.post, a.max_clip, max(JOIN, 2 * a.air))
     keep = settle(clips, gaps, rms, a.snap, fps, a.dur)
     cuts, t0 = [], 0.0
     for s, e, _ in keep:
@@ -357,19 +408,59 @@ def select_edl(a, raw, words, rms, fps):
         if not r["clip"]: continue
         k = r["clip"] - 1; r["in"], r["out"] = keep[k][:2]
         for side, e in (("in", edges[2 * k]), ("out", edges[2 * k + 1])): r[side + "_safe"], r[side + "_why"] = e["safe"], e["why"]
-    asked = check_edl([[*r["want"], 1] for r in rows if 0 <= r["t"] <= a.dur], blocks, a.dur, a.gap)
+    asked = check_edl([[*r["want"], 1] for r in rows if r.get("want") and 0 <= r["t"] <= a.dur], blocks, a.dur, a.gap)
     capw = [{**w, "e": min(w["e"], w["s"] + wordcap(w["w"], a.max_word) * len(w["w"].split()))} for w in words]  # captions must not ride a smeared word into another clip
-    return keep, cuts, {"rows": rows, "blocks": blocks, "utts": utterances(blocks, a.gap), "words": capw, "asked": asked, "sil": len(sil)}
+    return keep, cuts, {"rows": rows, "blocks": blocks, "utts": utterances(blocks, a.gap), "words": capw, "asked": asked, "sil": len(sil), "windows": windows}
+
+def window_rows(windows):
+    """The windows.json / edl shape: start, end, duration. The padded lo/hi stay internal; they are where a cut edge sits, not the speech-free span."""
+    rows = []
+    for w in windows:
+        s, e = round(float(w["start"]), 3), round(float(w["end"]), 3)
+        rows.append({"start": s, "end": e, "duration": round(e - s, 3)})
+    return rows
+
+def write_windows(work, windows):
+    rows = window_rows(windows)
+    (Path(work) / "windows.json").write_text(json.dumps(rows, indent=1) + "\n")
+    print(f"b-roll: {len(rows)} speech-free window(s), {sum(w['duration'] for w in rows):.1f}s")
+    for w in rows: print(f"  {w['start']:.2f}-{w['end']:.2f} ({w['duration']:.2f}s)")
+    return rows
+
+def write_storyboard(rows, work):
+    """storyboard.md and shots.json beside select.csv: the shot list to read before a render. section groups the markdown; note is the caller's."""
+    shots = []
+    for i, r in enumerate(rows, 1):
+        clip = r["clip"]
+        shots.append({"n": i, "t": round(float(r["t"]), 3), "label": r["label"], "section": r.get("section") or "", "note": r.get("shot_note") or "",
+                      "status": r["status"], "clip": clip, "in": None if not clip else round(float(r["in"]), 3), "out": None if not clip else round(float(r["out"]), 3),
+                      "duration": None if not clip else round(float(r["out"]) - float(r["in"]), 3), "speech": r["speech"], "caption": r.get("caption") or "", "edge": r["note"]})
+    (Path(work) / "shots.json").write_text(json.dumps(shots, indent=1) + "\n")
+    lines, groups = ["# Storyboard", ""], []
+    for s in shots:
+        if not groups or groups[-1][0] != s["section"]: groups.append((s["section"], []))
+        groups[-1][1].append(s)
+    for sec, group in groups:
+        if sec: lines += [f"## {sec}", ""]
+        for s in group:
+            span = f"{s['in']:.2f}-{s['out']:.2f} ({s['duration']:.2f}s), clip {s['clip']}, {s['status']}" if s["clip"] else s["status"]
+            lines.append(f"{s['n']}. **{s['label'] or 'untitled'}** — {s['t']:.2f}s, {span}")
+            if s["note"]: lines.append(f"   {s['note']}")
+            if s["edge"]: lines.append(f"   {s['edge']}")
+            if s["speech"]: lines.append(f"   speech: {s['speech']}")
+            lines.append("")
+    (Path(work) / "storyboard.md").write_text("\n".join(lines).rstrip() + "\n")
 
 def report_select(a, work, sel):
-    """Write select.csv, say what happened to each moment, then re-read the EDL on disk against the speech map. Returns the unsafe edges."""
+    """Write select.csv, storyboard.md and shots.json, say what happened to each moment, then re-read the EDL against the speech map. Returns unsafe edges."""
     rows, blocks = sel["rows"], sel["blocks"]
     with open(work / "select.csv", "w", newline="") as f:
-        w = csv.writer(f); w.writerow(["moment", "t", "status", "clip", "in", "out", "dur", "in_safe", "in_why", "out_safe", "out_why", "note", "speech", "caption"])
+        w = csv.writer(f); w.writerow(["moment", "t", "status", "clip", "in", "out", "dur", "in_safe", "in_why", "out_safe", "out_why", "note", "speech", "caption", "section", "shot_note"])
         for r in rows:
             c = r["clip"]; yn = lambda k: ("yes" if r[k] else "no") if c else ""
             w.writerow([r["label"], f"{r['t']:.3f}", r["status"], c or "", *([f"{r['in']:.3f}", f"{r['out']:.3f}", f"{r['out'] - r['in']:.3f}"] if c else [""] * 3),
-                        yn("in_safe"), r.get("in_why", ""), yn("out_safe"), r.get("out_why", ""), r["note"], r["speech"], r["caption"] or ""])
+                        yn("in_safe"), r.get("in_why", ""), yn("out_safe"), r.get("out_why", ""), r["note"], r["speech"], r["caption"] or "", r.get("section", ""), r.get("shot_note", "")])
+    write_storyboard(rows, work)
     est, app, bysil = [b for b in blocks if b["src"] == "cap"], sum(b["src"] == "app" for b in blocks), sum(b["src"] == "silence" for b in blocks)
     print(f"speech map: {len(blocks) - app} ASR words + {app} caller intervals -> {len(sel['utts'])} utterances; silencedetect found {sel['sil']} pause(s), which set {bysil} word end(s)")
     if est:
@@ -395,9 +486,68 @@ def report_select(a, work, sel):
         for e in bad: print(f"  {e['side']} edge at {e['t']:.3f}s: {e['why']}", file=sys.stderr)
     return bad
 
-# render: audio in one pass (fades, music, loudnorm), video in chunks (hw encode), then mux
+def report_broll(a, work, sel):
+    """windows.json, then the same edge self-check as --select. There are no moment rows: the windows are the cut."""
+    write_windows(work, sel["windows"])
+    blocks = sel["blocks"]
+    est = [b for b in blocks if b["src"] == "cap"]
+    if est: print(f"speech map: LOW CONFIDENCE. {len(est)} word end(s) are estimates; a window edge after one of them is inferred, not measured.")
+    edges = check_edl(json.loads((work / "edl.json").read_text())["keep"], blocks, a.dur, a.gap)
+    bad = [e for e in edges if not e["safe"]]
+    print(f"self-check: {len(edges)} edges re-read from edl.json: {sum(e['inside'] for e in edges)} inside speech, {len(bad)} not speech-safe")
+    if bad:
+        print(f"WARNING: {len(bad)} EDGE(S) NOT SPEECH-SAFE. Do not ship this cut.", file=sys.stderr)
+        for e in bad: print(f"  {e['side']} edge at {e['t']:.3f}s: {e['why']}", file=sys.stderr)
+    return bad
+
+# render: audio in one pass (fades, music, loudnorm, true-peak guard), video in chunks (hw encode), then mux
+TP = -1.0  # dBTP ceiling of the encoded master. AAC still peaks above a sample limiter, so the file is measured and the audio re-encoded until it is at or under this.
+LIMIT = 0.83  # starting alimiter ceiling (linear, level=false). 4x oversampled, 0.83 still measured about -0.5 dBTP; about 0.76 cleared -1 at the same LUFS.
+OSRATE = 192000  # 4x oversampling for the limiter; delivery stays 48 kHz
+
+def limiter_chain(limit):
+    """loudnorm, then a 4x-oversampled alimiter. level=false holds the integrated loudness; only the ceiling moves when the encoded peak is hot."""
+    return f"loudnorm=I=-12.5:TP=-1.5:LRA=11,aresample={OSRATE},alimiter=limit={limit:.4f}:level=false,aresample=48000"
+
+def parse_loudness(err):
+    """(true peak dBTP, integrated LUFS) from an ebur128 summary, else a loudnorm JSON print. None when neither is there."""
+    if err and "Summary:" in err:
+        tail = err.rsplit("Summary:", 1)[1]
+        i, p = re.search(r"I:\s+([+-]?[\d.]+) LUFS", tail), re.search(r"Peak:\s+([+-]?[\d.]+) dBFS", tail)
+        if i and p: return float(p.group(1)), float(i.group(1))
+    m = re.search(r"\{[^{}]*\"input_tp\"[^{}]*\}", err or "", re.S)
+    if not m: return None
+    d = json.loads(m.group(0))
+    return float(d["input_tp"]), float(d["input_i"])
+
+def measure_loudness(path):
+    """True peak and integrated LUFS of an encoded file. The meter sees the decoded samples, so the peak is the codec's, not the limiter's."""
+    path = str(Path(path).resolve())
+    def run(af): return subprocess.run(["ffmpeg", "-nostats", "-hide_banner", "-i", path, "-af", af, "-f", "null", "-"], capture_output=True, text=True).stderr
+    got = parse_loudness(run("ebur128=peak=true:framelog=quiet")) or parse_loudness(run("loudnorm=print_format=json"))
+    if not got: sys.exit(f"vidtight: could not read the true peak of {path}")
+    return got
+
+def guard_true_peak(encode, measure, limit=LIMIT, ceiling=TP, tries=5):
+    """encode(limit) writes the audio; measure() -> (tp, lufs) of that encoded file. Lowers the ceiling and re-encodes the audio only until tp <= ceiling.
+    Returns (limit, tp, lufs). The video is not touched. A pass that cannot get there stops at the floor and says so."""
+    for n in range(tries):
+        encode(limit)
+        tp, lufs = measure()
+        if tp <= ceiling:
+            print(f"loudness: {lufs:.1f} LUFS, {tp:.1f} dBTP")
+            return limit, tp, lufs
+        nxt = max(0.5, limit * 10 ** (-(tp - ceiling + 0.2) / 20))  # the overshoot, plus a little for the codec's intersample peak
+        if n == tries - 1 or nxt >= limit - 1e-4:
+            print(f"WARNING: encoded audio is {tp:.1f} dBTP (limiter {limit:.3f}); {ceiling:.0f} dBTP was not reached.", file=sys.stderr)
+            print(f"loudness: {lufs:.1f} LUFS, {tp:.1f} dBTP")
+            return limit, tp, lufs
+        print(f"loudness: {tp:.1f} dBTP is over {ceiling:.0f}, re-encoding audio at limiter {nxt:.3f}")
+        limit = nxt
+    raise RuntimeError("guard_true_peak needs at least one try")  # the loop returns; this is only reached if tries < 1
+
 def render_audio(src, keep, out, music=None, xf=0.02):
-    """Assemble the voice edit in numpy (fast, sample-exact), then one ffmpeg pass for music + loudnorm."""
+    """Assemble the voice edit in numpy (fast, sample-exact), then ffmpeg for music, loudnorm and a true-peak-guarded limiter."""
     import numpy as np, wave
     raw = Path(out).with_suffix(".src.s16")
     if not raw.exists(): sh(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vn", "-ac", "2", "-ar", "48000", "-f", "s16le", str(raw)])
@@ -414,17 +564,20 @@ def render_audio(src, keep, out, music=None, xf=0.02):
     with wave.open(str(voice), "wb") as w:
         w.setnchannels(2); w.setsampwidth(2); w.setframerate(R)
         w.writeframes(np.clip(np.concatenate(parts), -32768, 32767).astype(np.int16).tobytes())
-    inputs, fg = ["-i", str(voice)], ""
-    if music:
-        inputs += ["-i", str(music["file"])]
-        st, slam, duck = music["start_out"] + LEAD, music["slam_out"] + LEAD, 10 ** (music.get("duck_db", -19) / 20)
-        fg = (f"[1:a]aformat=sample_rates=48000:channel_layouts=stereo,"
-              f"volume='{duck}+(1-{duck})*clip((t-{slam - st:.3f})/0.5,0,1)':eval=frame,afade=t=out:st={music['dur'] - music.get('afade', 1.5):.3f}:d={music.get('afade', 1.5):.3f},"
-              f"adelay={int(st * 1000)}:all=1[mus];[0:a]apad=whole_dur={st + music['dur']:.3f}[vp];"
-              f"[vp][mus]amix=inputs=2:normalize=0:duration=longest,")
-    else: fg = "[0:a]"
-    fg += "loudnorm=I=-12.5:TP=-1.5:LRA=11,aresample=48000,alimiter=limit=0.83:level=false" + (f",afade=t=out:st={music['start_out'] + LEAD + music['dur'] - 2.5:.3f}:d=2.5" if music else "") + "[aout]"
-    sh(["ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex", fg, "-map", "[aout]", "-c:a", "aac_at", "-b:a", "256k", str(out)])
+    def encode(limit):
+        inputs, fg = ["-i", str(voice)], ""
+        if music:
+            inputs += ["-i", str(music["file"])]
+            st, slam, duck = music["start_out"] + LEAD, music["slam_out"] + LEAD, 10 ** (music.get("duck_db", -19) / 20)
+            fg = (f"[1:a]aformat=sample_rates=48000:channel_layouts=stereo,"
+                  f"volume='{duck}+(1-{duck})*clip((t-{slam - st:.3f})/0.5,0,1)':eval=frame,afade=t=out:st={music['dur'] - music.get('afade', 1.5):.3f}:d={music.get('afade', 1.5):.3f},"
+                  f"adelay={int(st * 1000)}:all=1[mus];[0:a]apad=whole_dur={st + music['dur']:.3f}[vp];"
+                  f"[vp][mus]amix=inputs=2:normalize=0:duration=longest,")
+        else: fg = "[0:a]"
+        fade = f",afade=t=out:st={music['start_out'] + LEAD + music['dur'] - 2.5:.3f}:d=2.5" if music else ""
+        fg += limiter_chain(limit) + fade + "[aout]"
+        sh(["ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex", fg, "-map", "[aout]", "-c:a", "aac_at", "-b:a", "256k", str(out)])
+    guard_true_peak(encode, lambda: measure_loudness(out))
 
 def render_video(src, keep, out, fps, bitrate, tail=0.0, fade=0.0, chunk=300.0, leadin=None, fadein=0.0):
     work = Path(out).parent / "vchunks"; work.mkdir(exist_ok=True)
@@ -454,6 +607,59 @@ def render_video(src, keep, out, fps, bitrate, tail=0.0, fade=0.0, chunk=300.0, 
     lst = work / "list.txt"; lst.write_text("".join(f"file '{f.resolve()}'\n" for f in files))
     sh(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(out)])
 
+def contact_times(dur, every):
+    """Source times of one frame every `every` seconds, from 0 up to but not past the end."""
+    if every <= 0: raise ValueError("contact interval must be positive")
+    out, i = [], 0
+    while i * every < dur - 1e-3:
+        out.append(i * every); i += 1
+    return out or [0.0]
+
+def tile_contact(frames, dest, cell_w=320):
+    """Label each frame with its timecode and tile them into one PNG. Every frame is scaled to the same width and padded to the
+    tallest cell before tiling, so mixed sizes still line up. Labels are drawn with Pillow: Homebrew ffmpeg often has no drawtext."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        sys.exit("vidtight: --contact needs Pillow (pip install pillow)")
+    font = None
+    for p in ("/System/Library/Fonts/Supplemental/Arial.ttf", "/Library/Fonts/Arial.ttf",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"):
+        if Path(p).exists():
+            try: font = ImageFont.truetype(p, 16); break
+            except OSError: font = None
+    font = font or ImageFont.load_default()
+    fitted = []
+    for path, label in frames:
+        im = Image.open(path).convert("RGB")
+        fitted.append((im.resize((cell_w, max(1, round(im.height * cell_w / im.width)))), label))
+    cell_h, bar, cards = max(im.height for im, _ in fitted), 24, []
+    for im, label in fitted:
+        canvas = Image.new("RGB", (cell_w, cell_h), (0, 0, 0))
+        canvas.paste(im, (0, (cell_h - im.height) // 2))
+        card = Image.new("RGB", (cell_w, cell_h + bar), (24, 18, 12))
+        card.paste(canvas, (0, 0))
+        ImageDraw.Draw(card).text((6, cell_h + 3), label, fill=(255, 214, 140), font=font)
+        cards.append(card)
+    n, cols = len(cards), 1
+    while cols * cols < n: cols += 1
+    rows = math.ceil(n / cols)
+    sheet = Image.new("RGB", (cols * cell_w, rows * (cell_h + bar)), (0, 0, 0))
+    for i, card in enumerate(cards): sheet.paste(card, ((i % cols) * cell_w, (i // cols) * (cell_h + bar)))
+    dest = Path(dest).resolve(); dest.parent.mkdir(parents=True, exist_ok=True); sheet.save(dest)
+
+def contact_sheet(src, dest, every):
+    """A frame of src every `every` seconds, labelled with its source timecode and tiled into dest. ffmpeg only extracts frames; every path is absolute."""
+    times, src = contact_times(duration(src), every), Path(src).resolve()
+    with tempfile.TemporaryDirectory() as td:
+        frames = []
+        for i, t in enumerate(times):
+            fp = (Path(td) / f"f{i:04d}.png").resolve()
+            sh(["ffmpeg", "-y", "-v", "error", "-ss", f"{t:.3f}", "-i", str(src), "-frames:v", "1", str(fp)])
+            frames.append((fp, ts(t, ".")))
+        tile_contact(frames, dest)
+    print(f"contact sheet: {Path(dest).resolve()} ({len(times)} frames, every {every:g}s)")
+
 def main():
     sys.stdout.reconfigure(line_buffering=True)
     p = argparse.ArgumentParser(description=__doc__)
@@ -473,9 +679,11 @@ def main():
     p.add_argument("--fadein", type=float, default=0.0, help="fade first footage in from black (s)")
     p.add_argument("--reuse", action="store_true", help="reuse cached transcript")
     p.add_argument("--words", help="use this words.json transcript instead of running ASR")
-    p.add_argument("--chunk", type=float, help="ASR chunk length s (default 120; 30 with --select, because long chunks drop whole lines when music runs under the voice)")
-    p.add_argument("--select", help="moments.yaml [{t, label, pre?, post?, caption?}]: keep only the windows around these moments, every edge in a speech gap")
-    p.add_argument("--speech", help="--select: exact speech intervals [[start, end, label], ...] logged by the app; they replace the ASR words they overlap")
+    p.add_argument("--chunk", type=float, help="ASR chunk length s (default 120; 30 with --select or --broll, because long chunks drop lines when music runs under the voice)")
+    p.add_argument("--select", help="moments.yaml [{t, label, pre?, post?, caption?, section?, note?}]: keep the windows around these moments, every edge in a speech gap")
+    p.add_argument("--broll", action="store_true", help="keep speech-free windows of at least --pause seconds (windows.json) instead of cutting pauses; with --select, a moment keeps the silent window it falls in")
+    p.add_argument("--contact", type=float, metavar="SECONDS", help="write a labelled contact sheet, one frame every N seconds, beside the analysis outputs")
+    p.add_argument("--speech", help="--select/--broll: exact speech intervals [[start, end, label], ...] from the app; they replace the ASR words they overlap")
     p.add_argument("--pre", type=float, default=1.0, help="--select: seconds kept before each moment"); p.add_argument("--post", type=float, default=4.0, help="--select: seconds kept after each moment")
     p.add_argument("--max-clip", type=float, default=12.0, help="--select: longest a clip may grow to take an utterance whole (s)")
     p.add_argument("--gap", type=float, default=0.4, help="--select: smallest speech gap an edge may use (s)")
@@ -484,7 +692,8 @@ def main():
     p.add_argument("--max-word", type=float, default=1.2, help="--select: longest a single word can last; longer ASR stamps are cut back (s)")
     p.add_argument("--strict", action="store_true", help="--select: exit 2 if any edge of the final EDL is not speech-safe")
     a = p.parse_args()
-    if a.speech and not a.select: p.error("--speech needs --select")
+    if a.speech and not (a.select or a.broll): p.error("--speech needs --select or --broll")
+    if a.contact is not None and a.contact <= 0: p.error("--contact interval must be positive")
     global LEAD
     if a.leadin: LEAD = duration(a.leadin)
     src = Path(a.src).expanduser().resolve(); work = Path(a.out).expanduser() if a.out else src.parent / (src.stem + ".vidtight"); work.mkdir(parents=True, exist_ok=True)
@@ -496,7 +705,7 @@ def main():
     if a.words: words = json.loads(Path(a.words).expanduser().read_text()); tj.write_text(json.dumps(words))
     elif a.reuse and tj.exists(): words = json.loads(tj.read_text())
     else:
-        chunk = a.chunk or (30 if a.select else 120)
+        chunk = a.chunk or (30 if a.select or a.broll else 120)
         words, asr_t = transcribe(src, work, a.model, *([chunk] if chunk != 120 else [])); tj.write_text(json.dumps(words))
         print(f"ASR: {a.dur:.1f}s audio in {asr_t:.1f}s ({a.dur / asr_t:.0f}x realtime)")
     if not a.wav.exists(): wav16k(src, a.wav)  # --words or --reuse into a fresh --out dir
@@ -505,7 +714,7 @@ def main():
     fixes = apply_vocab(words, (yaml.safe_load(vf.read_text()) or {}) if a.vocab or vf.exists() else {})
     rms = load_rms(a.wav)
     speed, sel = [], None
-    if a.select: keep, cuts, sel = select_edl(a, raw, words, rms, fps)
+    if a.select or a.broll: keep, cuts, sel = select_edl(a, raw, words, rms, fps)
     else:
         cuts = fix_fillers(find_cuts(words, a), rms)
         # manual edits
@@ -536,7 +745,10 @@ def main():
     srt = work / f"{name}.srt"
     write_srt(sel["words"] if sel else words, keep, srt, ed.get("replace"), extra)
     edl = {"src": str(src), "keep": keep, "cuts": cuts, "speed": speed, "vocab_fixes": fixes}
-    if sel: edl["select"], edl["speech"] = sel["rows"], sel["utts"]
+    if sel:
+        edl["speech"] = sel["utts"]
+        if a.select: edl["select"] = sel["rows"]
+        if sel.get("windows") is not None: edl["windows"] = window_rows(sel["windows"])
     (work / "edl.json").write_text(json.dumps(edl, indent=1))
     with open(work / "cuts.csv", "w") as f:
         f.write("start,end,type,detail\n")
@@ -544,11 +756,18 @@ def main():
         for s, e, sp in speed: f.write(f"{ts(s, '.')},{ts(e, '.')},speed x{sp},\"{e - s:.1f}s -> {(e - s) / sp:.1f}s\"\n")
     by = {}
     for c in cuts: by[c[2]] = by.get(c[2], 0) + 1
-    unsafe = report_select(a, work, sel) if sel else []
+    if sel and a.select:
+        if a.broll: write_windows(work, sel["windows"])
+        unsafe = report_select(a, work, sel)
+    elif sel: unsafe = report_broll(a, work, sel)
+    else: unsafe = []
     if not sel: print(f"cuts: {by} speed-ups: {len(speed)} vocab fixes: {len(fixes)}")
     print(f"duration: {a.dur:.1f}s -> {outdur:.1f}s edit (+{tail:.1f}s music tail) = {outdur + tail:.1f}s (+{LEAD:.1f}s lead-in), {len(keep)} segments")
+    if a.contact: contact_sheet(src, work / "contact.png", a.contact)
     if unsafe and a.strict: print(f"outputs in {work}"); sys.exit(2)
-    if a.render and not keep: sys.exit("vidtight: nothing to render: " + (f"no moment survived the selection (see {work / 'select.csv'})" if sel else "every second was cut"))
+    if a.render and not keep:
+        why = f"no moment survived the selection (see {work / 'select.csv'})" if a.select else f"no speech-free window to keep (see {work / 'windows.json'})" if a.broll else "every second was cut"
+        sys.exit("vidtight: nothing to render: " + why)
     if a.render:
         t = time.time()
         aud, vid, out = work / f"{name}.audio.m4a", work / f"{name}.video.mp4", work / f"{name}.mp4"

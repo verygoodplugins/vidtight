@@ -5,6 +5,7 @@ ffmpeg, ffprobe and parakeet-mlx are all stubbed, so these run on any machine wi
 import json
 import sys
 import wave
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -255,3 +256,187 @@ def test_main_still_fails_on_an_explicit_missing_vocab(stub_media, monkeypatch, 
     monkeypatch.setattr(v, "transcribe", lambda src, work, model: (spoken("Hello", "world."), 1.0))
     with pytest.raises(FileNotFoundError):
         run_cli(monkeypatch, tmp_path, "--vocab", str(tmp_path / "nope.yaml"))
+
+
+# --- true peak, contact sheet ------------------------------------------------------------------
+
+EBUR = """
+[Parsed_ebur128_0] t: 0.1  I: -70.0 LUFS  TPK: -9.9 dBFS
+[Parsed_ebur128_0] Summary:
+
+  Integrated loudness:
+    I:         -12.2 LUFS
+    Threshold: -22.4 LUFS
+
+  True peak:
+    Peak:       -1.1 dBFS
+"""
+
+LOUDNORM = """
+[Parsed_loudnorm_0]
+{
+	"input_i" : "-12.20",
+	"input_tp" : "-0.50",
+	"input_lra" : "4.20",
+	"input_thresh" : "-22.50",
+	"output_i" : "-12.50",
+	"output_tp" : "-1.50",
+	"output_lra" : "4.20",
+	"output_thresh" : "-22.80",
+	"normalization_type" : "dynamic",
+	"target_offset" : "0.00"
+}
+"""
+
+
+def test_parse_loudness_prefers_the_ebur128_summary_over_frame_lines():
+    # The per-frame log also contains "I:" and "dBFS". Only the summary counts, and it is the encoded file's true peak.
+    assert v.parse_loudness(EBUR) == (-1.1, -12.2)
+    assert v.parse_loudness(LOUDNORM) == (-0.5, -12.2)
+    assert v.parse_loudness("no meter here") is None
+
+
+def test_measure_loudness_reads_ebur128_and_falls_back_to_loudnorm(monkeypatch, tmp_path):
+    calls = []
+
+    def meter(cmd):
+        return any("ebur128" in str(part) for part in cmd)
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        err = EBUR if len(calls) == 1 else LOUDNORM
+        return SimpleNamespace(returncode=0, stdout="", stderr=err if meter(cmd) else "")
+
+    monkeypatch.setattr(v.subprocess, "run", fake_run)
+    target = tmp_path / "out.m4a"
+    assert v.measure_loudness(target) == (-1.1, -12.2)
+    assert Path(calls[0][calls[0].index("-i") + 1]).is_absolute()
+    assert "ebur128=peak=true:framelog=quiet" in calls[0]
+    assert len(calls) == 1  # the summary parsed, so loudnorm was not needed
+
+    calls.clear()
+    monkeypatch.setattr(v.subprocess, "run", lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="", stderr="" if meter(cmd) else LOUDNORM))
+    assert v.measure_loudness(target) == (-0.5, -12.2)
+
+
+def test_true_peak_guard_reencodes_audio_until_the_encoded_peak_clears(capsys):
+    limits = []
+
+    def encode(limit):
+        limits.append(limit)
+
+    peaks = iter([(-0.5, -12.2), (-1.1, -12.2)])
+    limit, tp, lufs = v.guard_true_peak(encode, lambda: next(peaks))
+    assert limits[0] == pytest.approx(0.83) and limits[1] < 0.83
+    assert "aresample=192000" in v.limiter_chain(limits[0]) and f"alimiter=limit={limits[0]:.4f}" in v.limiter_chain(limits[0])
+    assert (limit, tp, lufs) == (limits[-1], -1.1, -12.2)
+    out = capsys.readouterr().out
+    assert "re-encoding audio" in out and "loudness: -12.2 LUFS, -1.1 dBTP" in out
+
+
+def test_true_peak_guard_stops_when_the_encoded_peak_already_passes(capsys):
+    limits = []
+    v.guard_true_peak(lambda limit: limits.append(limit), lambda: (-1.4, -12.2))
+    assert limits == [pytest.approx(0.83)]
+    assert "re-encoding" not in capsys.readouterr().out
+
+
+def test_true_peak_guard_warns_when_the_peak_never_clears(capsys):
+    v.guard_true_peak(lambda limit: None, lambda: (0.2, -12.0), tries=2)
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "0.2 dBTP" in err
+
+
+def test_render_audio_measures_the_encoded_file_and_lowers_the_limiter(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(v, "LEAD", 0.0)
+    out = tmp_path / "clip.audio.m4a"
+    raw = out.with_suffix(".src.s16")
+    raw.write_bytes(np.zeros((4800, 2), np.int16).tobytes())  # 0.1 s of stereo 48 kHz, so the extract is skipped
+    cmds = []
+
+    def fake_sh(cmd):
+        cmds.append(cmd)
+        Path(cmd[-1]).write_bytes(b"m4a")
+
+    peaks = iter([(-0.5, -12.2), (-1.1, -12.2)])
+    monkeypatch.setattr(v, "sh", fake_sh)
+    monkeypatch.setattr(v, "measure_loudness", lambda path: next(peaks))
+    v.render_audio(tmp_path / "clip.mov", [[0.0, 0.1, 1]], out)
+    encodes = [c for c in cmds if "aac_at" in c]
+    assert len(encodes) == 2  # the hot encode, then the audio only, at a lower ceiling
+    graphs = [c[c.index("-filter_complex") + 1] for c in encodes]
+    assert "aresample=192000" in graphs[0] and "alimiter=limit=0.8300" in graphs[0]
+    assert "alimiter=limit=0.8300" not in graphs[1]
+    limit = float(graphs[1].split("alimiter=limit=")[1].split(":")[0])
+    assert limit < 0.83
+    assert "loudness: -12.2 LUFS, -1.1 dBTP" in capsys.readouterr().out
+
+
+def test_contact_times_are_every_n_seconds_and_include_the_start():
+    assert v.contact_times(24, 10) == [0, 10, 20]
+    assert v.contact_times(10, 5) == [0, 5]
+    assert v.contact_times(0.4, 10) == [0.0]
+    with pytest.raises(ValueError):
+        v.contact_times(10, 0)
+
+
+def test_tile_contact_normalises_mixed_frame_sizes_and_draws_a_label(tmp_path):
+    from PIL import Image
+
+    wide, tall = tmp_path / "wide.png", tmp_path / "tall.png"
+    Image.new("RGB", (100, 40), (200, 0, 0)).save(wide)
+    Image.new("RGB", (40, 100), (0, 0, 200)).save(tall)
+    dest = tmp_path / "sheet" / "contact.png"
+    v.tile_contact([(wide, "00:00:00.000"), (tall, "00:00:10.000")], dest, cell_w=40)
+    sheet = Image.open(dest)
+    assert sheet.size == (80, 100 + 24)  # two cells, width-normalised, padded to the taller frame, plus the label bar
+    assert sheet.getpixel((20, 50)) == (200, 0, 0)  # the wide frame sits in the middle of its cell, not stretched
+    assert sheet.getpixel((0, 0)) == (0, 0, 0)  # the pad above it
+    assert sheet.getpixel((40 + 20, 50)) == (0, 0, 200)
+    bar = [sheet.getpixel((x, 100 + 8)) for x in range(6, 36)]
+    assert any(px[0] > 80 for px in bar)  # the timecode is drawn into the bar, not left as the bar colour
+
+
+def test_contact_sheet_extracts_frames_by_absolute_path(monkeypatch, tmp_path, capsys):
+    cmds = []
+    monkeypatch.setattr(v, "duration", lambda p: 10.0)
+    monkeypatch.setattr(v, "sh", lambda cmd: cmds.append(list(cmd)))
+
+    def fake_tile(frames, dest):
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"png")
+        assert [label for _, label in frames] == ["00:00:00.000", "00:00:05.000"]
+
+    monkeypatch.setattr(v, "tile_contact", fake_tile)
+    src = tmp_path / "clip.mov"
+    src.write_bytes(b"")
+    dest = tmp_path / "out" / "contact.png"
+    v.contact_sheet(src, dest, 5)
+    assert len(cmds) == 2  # t = 0 and t = 5
+    for cmd in cmds:
+        assert Path(cmd[cmd.index("-i") + 1]) == src.resolve()
+        assert Path(cmd[-1]).is_absolute()
+    text = capsys.readouterr().out
+    assert "contact sheet:" in text and "every 5s" in text
+
+
+def test_main_contact_flag_writes_the_sheet_beside_the_analysis(stub_media, monkeypatch, tmp_path):
+    seen = {}
+
+    def fake(src, dest, every):
+        seen.update(src=Path(src), dest=Path(dest), every=every)
+        Path(dest).write_bytes(b"png")
+
+    monkeypatch.setattr(v, "contact_sheet", fake)
+    monkeypatch.setattr(v, "transcribe", lambda src, work, model: (spoken("Hello", "world."), 1.0))
+    out = run_cli(monkeypatch, tmp_path, "--contact", "4")
+    assert seen["every"] == 4 and seen["dest"] == out / "contact.png" and seen["src"].name == "clip.mov"
+    assert (out / "contact.png").exists() and (out / "edl.json").exists()
+
+
+def test_main_rejects_a_non_positive_contact_interval(stub_media, monkeypatch, tmp_path):
+    monkeypatch.setattr(v, "transcribe", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should fail before ASR")))
+    monkeypatch.setattr(sys, "argv", ["vidtight", "clip.mov", "--out", str(tmp_path), "--contact", "0"])
+    with pytest.raises(SystemExit):
+        v.main()

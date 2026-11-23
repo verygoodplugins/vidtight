@@ -8,6 +8,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `--render` measures the encoded audio's true peak and integrated LUFS. The limiter
+  is 4× oversampled. If the encoded true peak is above −1 dBTP, the audio is
+  re-encoded at a lower ceiling until it passes, and the final numbers are
+  printed. A ceiling near 0.76 is what cleared −1 dBTP after AAC where 0.83
+  still measured about −0.5, at the same LUFS.
+- `--broll`: write speech-free windows (`windows.json`, with start, end and
+  duration) from the speech map instead of cutting pauses. A clip with no
+  speech is one window, the whole file, so a silent shot stays whole. With
+  `--select`, a moment keeps the silent window it falls in.
+- `--contact N`: a contact sheet (`contact.png`) beside the analysis outputs,
+  one frame every N seconds, labelled with its timecode. Frames are normalised
+  to one size before tiling. Labels are drawn with Pillow, not ffmpeg `drawtext`.
+- `--select` moments take optional `section` and `note`. The run writes
+  `storyboard.md` and `shots.json` next to `select.csv`.
+
 - GitHub card and README hero: low-poly shears cutting an amber waveform,
   kicker `vidtight`, headline "Tighten the take". No byline. Pack lives in
   `docs/brand/`.

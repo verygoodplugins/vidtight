@@ -37,6 +37,10 @@ words.json
 edl.json
 cuts.csv
 select.csv
+windows.json
+shots.json
+storyboard.md
+contact.png
 *.srt
 
 # Media and intermediates never belong in git
