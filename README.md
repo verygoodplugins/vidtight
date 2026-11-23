@@ -44,7 +44,7 @@ recording.mov
 3. **Fix vocabulary.** Product and brand names are corrected from [`vocab.yaml`](vocab.yaml).
 4. **Build the EDL.** Cuts are inverted into keep-segments. Parakeet stamps fillers late, so filler cuts start at the audio dip before the word. Every edge snaps to the quietest frame within `--snap` seconds and is quantized to the video frame rate.
 5. **Write captions.** An SRT is retimed to the tightened cut.
-6. **Render (optional).** Audio is assembled sample-exactly with numpy (20 ms crossfades at every join), then one ffmpeg pass applies the optional music bed, `loudnorm` and a limiter and encodes AAC. Video is encoded in chunks with VideoToolbox hardware H.264 and muxed with the captions as a soft subtitle track.
+6. **Render (optional).** Audio is assembled sample-exactly with numpy (20 ms crossfades at every join), then one ffmpeg pass applies the optional music bed, `loudnorm` and a 4×-oversampled limiter and encodes AAC. The encoded file is measured (true peak and integrated LUFS). If the true peak is above −1 dBTP, the audio is re-encoded at a lower ceiling until it passes, and the final numbers are printed. Video is encoded in chunks with VideoToolbox hardware H.264 and muxed with the captions as a soft subtitle track.
 
 ## Requirements
 
@@ -95,6 +95,9 @@ Outputs land in `<source name>.vidtight/` next to the source (override with `--o
 | `cuts.csv` | Every cut with start, end, type (`filler`, `stutter`, `retake`, `pause`, `manual`) and detail |
 | `<name>.srt` | Captions retimed to the tightened cut |
 | `<name>.mp4` | With `--render`: tightened video, AAC audio and soft subtitles (plus intermediate audio/video files) |
+| `contact.png` | With `--contact`: one labelled frame every N seconds |
+| `windows.json` | With `--broll`: speech-free windows (`start`, `end`, `duration`) |
+| `storyboard.md`, `shots.json` | With `--select`: the shot list to read before a render |
 
 Review `cuts.csv` before rendering. Each row is a source timestamp range, so you can jump straight to anything suspicious.
 
@@ -145,6 +148,8 @@ start,end,type,detail
 | `--air SECONDS` | `0` | Voice-free footage kept at every edge next to speech, where the pause is long enough. Joins clips less than twice this apart |
 | `--max-word SECONDS` | `1.2` | Longest a single word can last. Longer ASR stamps are cut back |
 | `--strict` | off | Exit 2 if any edge of the final EDL is not speech-safe |
+| `--broll` | off | Keep speech-free windows instead of cutting pauses. With `--select`, a moment keeps the silent window it falls in |
+| `--contact SECONDS` | off | Contact sheet, one labelled frame every N seconds |
 | `--bitrate RATE` | `16M` | Video bitrate for the render |
 | `--leadin FILE` | none | Pre-encoded title-card clip (same size, fps and codec) to prepend |
 | `--fadein SECONDS` | `0` | Fade the first footage in from black |
@@ -200,8 +205,8 @@ vidtight capture.mp4 --select moments.yaml --speech speech.json --air 1 --gap 0.
 ```
 
 ```yaml
-# moments.yaml: times are source seconds
-- {t: 14.5, label: "room asleep, title"}
+# moments.yaml: times are source seconds. section and note are optional; they land in the storyboard.
+- {t: 14.5, label: "room asleep, title", section: open, note: "hold on the sleeping room"}
 - {t: 24.4, label: "takes an orb", pre: 0.5, post: 3}    # per-moment window
 - {t: 109.8, label: "supernova", caption: "Supernova"}    # caption lands in the SRT over that clip
 ```
@@ -227,6 +232,7 @@ Clips closer than 0.5 s (or twice `--air`) are merged, and clips always come out
 | --- | --- |
 | `edl.json` | Same schema as the tighten mode. `keep` holds the clips and `cuts` the unselected ranges, plus `select` (one entry per moment) and `speech` (the utterances) |
 | `select.csv` | One row per moment: status (`kept`, `widened`, `trimmed`, `dropped`, `+merged`), clip number, in, out, whether each edge is speech-safe and why, what moved, and the speech the clip contains |
+| `storyboard.md`, `shots.json` | The same moments as a shot list, grouped by `section`, with each moment's `note`. Read this before `--render` |
 | `<name>.srt` | The spoken words inside the clips plus any moment captions, retimed |
 
 After writing `edl.json`, vidtight reads it back and checks every edge against the speech map:
@@ -238,6 +244,16 @@ self-check: 16 edges re-read from edl.json: 0 inside speech, 0 under 30 ms from 
 ```
 
 The first two numbers should be zero. If they aren't, a warning goes to stderr, and with `--strict` vidtight exits 2 before rendering.
+
+### B-roll (`--broll`)
+
+Pause cutting treats a silent shot as dead air, so a 24 s hero with no speech (or only a little setup chatter) comes out a few seconds long. `--broll` reuses the speech map and does the opposite: it writes every speech-free gap of at least `--pause` seconds to `windows.json` (`start`, `end`, `duration`) and keeps those windows. A clip with no speech is one window, the whole file. Setup chatter is left out. The rendered edge sits on the usual pad inside the window, so it does not land on a word. With `--select`, a moment keeps the silent window it falls in, instead of a `--pre` / `--post` slice. An empty moments file keeps nothing; leave `--select` off to keep every window.
+
+`broll_windows(blocks, dur)` is the same step as a plain function.
+
+### Contact sheet (`--contact`)
+
+`--contact 2` writes `contact.png` next to the analysis files: a frame of the source every 2 seconds, labelled with its timecode. Frames are scaled to one width and padded to one height before they are tiled, and the paths passed to ffmpeg are absolute. The labels are drawn with Pillow. A Homebrew ffmpeg often has no `drawtext` filter, so the sheet does not use it.
 
 ### Limits
 

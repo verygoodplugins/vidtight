@@ -148,5 +148,5 @@ def test_write_srt_retimes_kept_words_and_skips_cut_ones(tmp_path):
 
 def test_cli_help_lists_the_main_flags():
     out = subprocess.run([sys.executable, str(ROOT / "vidtight.py"), "--help"], capture_output=True, text=True, check=True).stdout
-    for flag in ("--render", "--edits", "--vocab", "--retake-words", "--reuse"):
+    for flag in ("--render", "--edits", "--vocab", "--retake-words", "--reuse", "--broll", "--contact", "--select"):
         assert flag in out

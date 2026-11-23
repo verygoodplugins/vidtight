@@ -509,3 +509,142 @@ def test_speech_without_select_is_an_error(stub_media, monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", ["vidtight", "clip.mp4", "--out", str(tmp_path), "--speech", "speech.yaml"])
     with pytest.raises(SystemExit):
         v.main()
+
+
+# --- b-roll and storyboard ---------------------------------------------------------------------
+
+
+def test_broll_windows_of_a_silent_file_are_the_whole_file_even_when_it_is_short():
+    # Pause cutting would keep only the pads at each end. A silent hero shot is one window.
+    (hero,) = v.broll_windows([], 24.0)
+    assert (hero["start"], hero["end"], hero["duration"]) == (0.0, 24.0, 24.0)
+    (short,) = v.broll_windows([], 0.4, minlen=0.8)
+    assert short["duration"] == pytest.approx(0.4)
+
+
+def test_broll_windows_drop_setup_chatter_and_the_breaths_inside_it():
+    (shot,) = v.broll_windows(v.speech_blocks(say("hang on a second.", 0.0)), 24.0)
+    assert shot["start"] == pytest.approx(1.2) and shot["end"] == pytest.approx(24.0)
+    words = say("Auto", 1.0) + say("Jack.", 1.46) + say("Hi there.", 2.0) + say("Bye.", 4.0)  # 0.16 s and 0.24 s gaps inside the chatter
+    lengths = [round(w["duration"], 2) for w in v.broll_windows(v.speech_blocks(words), DUR)]
+    assert 0.16 not in lengths and 0.24 not in lengths
+    assert any(d > 1 for d in lengths)
+
+
+def test_a_broll_moment_keeps_the_whole_silent_window_not_a_pre_post_slice():
+    blocks, gaps = gaps_for(WORDS)
+    clips, (row,) = v.select_broll([{"t": 20.0, "label": "hero", "section": "chorus", "note": "hold the wide shot"}], v.windows_of(gaps, 0.8), blocks, DUR)
+    assert len(clips) == 1 and clips[0][1] - clips[0][0] > 12  # the gap around t=20, not the 5 s default window
+    assert clips[0][0] <= 20 <= clips[0][1]
+    assert row["status"] == "kept" and row["section"] == "chorus" and row["shot_note"] == "hold the wide shot"
+
+
+def test_broll_without_a_selection_keeps_every_window_and_an_empty_list_keeps_none():
+    windows = v.broll_windows([], DUR)
+    clips, rows = v.select_broll(None, windows, [], DUR)
+    assert clips == [[0.0, DUR]] and rows == []
+    assert v.select_broll([], windows, [], DUR) == ([], [])
+
+
+def test_an_empty_moments_file_with_broll_keeps_nothing(stub_media, monkeypatch, tmp_path):
+    for text in ("[]\n", "moments: []\n"):
+        out = run_select(monkeypatch, tmp_path, text, "--broll", "--snap", "0")
+        edl = json.loads((out / "edl.json").read_text())
+        assert edl["keep"] == [] and edl["select"] == []
+        assert json.loads((out / "shots.json").read_text()) == []
+        assert json.loads((out / "windows.json").read_text())  # the speech-free inventory is still written
+
+
+def test_broll_drops_a_moment_that_lands_in_speech():
+    blocks, gaps = gaps_for(WORDS)
+    clips, (row,) = v.select_broll([{"t": 10.5, "label": "inside the line"}], v.windows_of(gaps, 0.8), blocks, DUR)
+    assert clips == [] and row["status"] == "dropped" and "speech" in row["note"]
+
+
+def test_moments_keep_an_optional_section_and_note_without_changing_the_cut():
+    _, (row,) = pick([{"t": 20.0, "label": "quiet bit", "section": "verse", "note": "let it breathe"}])
+    assert row["status"] == "kept" and row["section"] == "verse" and row["shot_note"] == "let it breathe"
+    assert row["note"] == ""  # the caller's note does not replace the edge-move note
+
+
+def test_write_srt_is_empty_when_the_keep_holds_no_words(tmp_path):
+    out = tmp_path / "o.srt"
+    assert v.write_srt([{"w": "Hello.", "s": 0.0, "e": 0.4, "eos": True}], [[10.0, 12.0, 1]], out) == 0
+    assert out.read_text() == ""
+
+
+def _render_cmds(monkeypatch):
+    cmds = []
+    monkeypatch.setattr(v, "sh", lambda cmd: cmds.append(cmd) or "30/1,30/1\n")
+    monkeypatch.setattr(v, "render_audio", lambda *a, **k: None)
+    monkeypatch.setattr(v, "render_video", lambda *a, **k: None)
+    return cmds
+
+
+def test_broll_render_omits_an_empty_subtitle_track(stub_media, monkeypatch, tmp_path):
+    cmds = _render_cmds(monkeypatch)
+    out = tmp_path / "out"
+    (tmp_path / "words.json").write_text("[]")
+    monkeypatch.setattr(sys, "argv", ["vidtight", str(tmp_path / "clip.mp4"), "--out", str(out), "--words", str(tmp_path / "words.json"), "--broll", "--render"])
+    v.main()
+    mux = next(c for c in cmds if "+faststart" in c)
+    assert str(out / "clip.srt") not in mux and "2:s" not in mux
+    assert (out / "clip.srt").read_text() == ""
+
+
+def test_render_still_muxes_subtitles_when_the_cut_has_speech(stub_media, monkeypatch, tmp_path):
+    cmds = _render_cmds(monkeypatch)
+    out = run_select(monkeypatch, tmp_path, "- {t: 10.5, label: title, pre: 0.3, post: 0.3}\n", "--render", "--snap", "0")
+    mux = next(c for c in cmds if "+faststart" in c)
+    assert str(out / "clip.srt") in mux and "2:s" in mux
+
+
+def test_main_broll_keeps_a_silent_hero_shot_whole(stub_media, monkeypatch, tmp_path, capsys):
+    out = tmp_path / "out"
+    (tmp_path / "words.json").write_text("[]")
+    monkeypatch.setattr(sys, "argv", ["vidtight", str(tmp_path / "clip.mp4"), "--out", str(out), "--words", str(tmp_path / "words.json"), "--broll"])
+    v.main()
+    windows = json.loads((out / "windows.json").read_text())
+    assert windows == [{"start": 0.0, "end": 60.0, "duration": 60.0}]
+    edl = json.loads((out / "edl.json").read_text())
+    assert edl["keep"] == [[0.0, 60.0, 1]] and edl["windows"] == windows
+    assert not any(c[2] == "pause" for c in edl["cuts"])
+    assert "b-roll: 1 speech-free window" in capsys.readouterr().out
+    assert not (out / "select.csv").exists()
+
+
+def test_main_broll_leaves_setup_chatter_out_of_the_window(stub_media, monkeypatch, tmp_path):
+    out = tmp_path / "out"
+    (tmp_path / "words.json").write_text(json.dumps(say("hang on a second.", 0.0)))
+    monkeypatch.setattr(sys, "argv", ["vidtight", str(tmp_path / "clip.mp4"), "--out", str(out), "--words", str(tmp_path / "words.json"), "--broll", "--snap", "0"])
+    v.main()
+    (window,) = json.loads((out / "windows.json").read_text())
+    assert window["start"] == pytest.approx(1.2) and window["duration"] > 50
+    (s, e, _), = json.loads((out / "edl.json").read_text())["keep"]
+    assert s > 1 and e - s > 50  # the hero shot, not the chatter plus a pad
+
+
+def test_main_select_broll_keeps_the_silent_window_around_the_moment(stub_media, monkeypatch, tmp_path):
+    moments = '- {t: 20.0, label: hero, section: chorus, note: "hold the wide shot"}\n'
+    out = run_select(monkeypatch, tmp_path, moments, "--broll", "--snap", "0")
+    (s, e, _), = json.loads((out / "edl.json").read_text())["keep"]
+    assert e - s > 12 and s <= 20 <= e  # not the default 19-24 slice
+    assert (out / "windows.json").exists() and (out / "select.csv").exists()
+    (shot,) = json.loads((out / "shots.json").read_text())
+    assert shot["section"] == "chorus" and shot["note"] == "hold the wide shot" and shot["status"] == "kept"
+    assert "## chorus" in (out / "storyboard.md").read_text() and "hold the wide shot" in (out / "storyboard.md").read_text()
+
+
+def test_main_select_writes_a_storyboard_grouped_by_section(stub_media, monkeypatch, tmp_path):
+    moments = '- {t: 20.0, label: "quiet bit", section: verse, note: "let it breathe"}\n- {t: 99.0, label: nope, section: end}\n'
+    out = run_select(monkeypatch, tmp_path, moments, "--snap", "0")
+    shots = json.loads((out / "shots.json").read_text())
+    assert [(s["label"], s["section"], s["note"], s["status"]) for s in shots] == [
+        ("quiet bit", "verse", "let it breathe", "kept"),
+        ("nope", "end", "", "dropped"),
+    ]
+    assert shots[0]["duration"] == pytest.approx(5.0)
+    md = (out / "storyboard.md").read_text()
+    assert md.index("## verse") < md.index("## end") and "let it breathe" in md
+    rows = list(csv.DictReader((out / "select.csv").open()))
+    assert rows[0]["section"] == "verse" and rows[0]["shot_note"] == "let it breathe" and rows[0]["note"] == ""
