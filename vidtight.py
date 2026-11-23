@@ -216,6 +216,7 @@ def write_srt(words, keep, path, replace=None, extra=(), maxw=8):
     items = [(s + LEAD, e + LEAD, t) for s, e, t in items]
     out = [f"{i}\n{ts(s)} --> {ts(e)}\n{t}\n" for i, (s, e, t) in enumerate(sorted(items), 1)]
     Path(path).write_text("\n".join(out))
+    return len(items)  # 0 when the cut has no speech and no captions; the mux must not require a subtitle stream then
 
 # (i) --select: keep the windows around wanted moments instead of cutting the unwanted bits. Every edge goes in a speech gap.
 def wordcap(w, maxword=1.2): return min(maxword, 0.3 + 0.1 * len(norm(w)))  # longest a spoken word plausibly lasts: 0.3 s + 0.1 s a letter
@@ -743,7 +744,7 @@ def main():
     if sel: extra += [(c0, max(c1, c0 + 0.3), str(r["caption"])) for r in sel["rows"] if r["clip"] and r["caption"] for c0, c1 in [(remap(max(r["in"], r["want"][0]), keep), remap(min(r["out"], r["want"][1]), keep))]]
     name = a.name or src.stem
     srt = work / f"{name}.srt"
-    write_srt(sel["words"] if sel else words, keep, srt, ed.get("replace"), extra)
+    cues = write_srt(sel["words"] if sel else words, keep, srt, ed.get("replace"), extra)
     edl = {"src": str(src), "keep": keep, "cuts": cuts, "speed": speed, "vocab_fixes": fixes}
     if sel:
         edl["speech"] = sel["utts"]
@@ -773,9 +774,16 @@ def main():
         aud, vid, out = work / f"{name}.audio.m4a", work / f"{name}.video.mp4", work / f"{name}.mp4"
         render_audio(src, keep, aud, music); print(f"audio done {time.time() - t:.0f}s", flush=True)
         render_video(src, keep, vid, fps, a.bitrate, tail, fade=music.get("fade", tail) if music else 0.0, leadin=a.leadin, fadein=a.fadein)
-        # end with the video, not -shortest: the caption track stops at the last spoken word, which would cut off any footage after it
-        sh(["ffmpeg", "-y", "-v", "error", "-i", str(vid), "-i", str(aud), "-i", str(srt), "-map", "0:v", "-map", "1:a", "-map", "2:s",
-            "-c:v", "copy", "-c:a", "copy", "-c:s", "mov_text", "-metadata:s:s:0", "language=eng", "-t", f"{duration(vid):.3f}", "-movflags", "+faststart", str(out)])
+        # end with the video, not -shortest: the caption track stops at the last spoken word, which would cut off any footage after it.
+        # an empty SRT (a silent --broll window, no moment or music caption) is not an input: mapping a subtitle stream that is not there fails the mux
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(vid), "-i", str(aud)]
+        if cues: cmd += ["-i", str(srt)]
+        cmd += ["-map", "0:v", "-map", "1:a"]
+        if cues: cmd += ["-map", "2:s"]
+        cmd += ["-c:v", "copy", "-c:a", "copy"]
+        if cues: cmd += ["-c:s", "mov_text", "-metadata:s:s:0", "language=eng"]
+        cmd += ["-t", f"{duration(vid):.3f}", "-movflags", "+faststart", str(out)]
+        sh(cmd)
         print(f"rendered {out} ({duration(out):.1f}s) in {time.time() - t:.0f}s")
     print(f"outputs in {work}")
 

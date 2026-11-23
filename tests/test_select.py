@@ -551,6 +551,38 @@ def test_moments_keep_an_optional_section_and_note_without_changing_the_cut():
     assert row["note"] == ""  # the caller's note does not replace the edge-move note
 
 
+def test_write_srt_is_empty_when_the_keep_holds_no_words(tmp_path):
+    out = tmp_path / "o.srt"
+    assert v.write_srt([{"w": "Hello.", "s": 0.0, "e": 0.4, "eos": True}], [[10.0, 12.0, 1]], out) == 0
+    assert out.read_text() == ""
+
+
+def _render_cmds(monkeypatch):
+    cmds = []
+    monkeypatch.setattr(v, "sh", lambda cmd: cmds.append(cmd) or "30/1,30/1\n")
+    monkeypatch.setattr(v, "render_audio", lambda *a, **k: None)
+    monkeypatch.setattr(v, "render_video", lambda *a, **k: None)
+    return cmds
+
+
+def test_broll_render_omits_an_empty_subtitle_track(stub_media, monkeypatch, tmp_path):
+    cmds = _render_cmds(monkeypatch)
+    out = tmp_path / "out"
+    (tmp_path / "words.json").write_text("[]")
+    monkeypatch.setattr(sys, "argv", ["vidtight", str(tmp_path / "clip.mp4"), "--out", str(out), "--words", str(tmp_path / "words.json"), "--broll", "--render"])
+    v.main()
+    mux = next(c for c in cmds if "+faststart" in c)
+    assert str(out / "clip.srt") not in mux and "2:s" not in mux
+    assert (out / "clip.srt").read_text() == ""
+
+
+def test_render_still_muxes_subtitles_when_the_cut_has_speech(stub_media, monkeypatch, tmp_path):
+    cmds = _render_cmds(monkeypatch)
+    out = run_select(monkeypatch, tmp_path, "- {t: 10.5, label: title, pre: 0.3, post: 0.3}\n", "--render", "--snap", "0")
+    mux = next(c for c in cmds if "+faststart" in c)
+    assert str(out / "clip.srt") in mux and "2:s" in mux
+
+
 def test_main_broll_keeps_a_silent_hero_shot_whole(stub_media, monkeypatch, tmp_path, capsys):
     out = tmp_path / "out"
     (tmp_path / "words.json").write_text("[]")

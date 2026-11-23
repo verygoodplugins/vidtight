@@ -82,6 +82,9 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `--broll --render` with no captions no longer fails the final mux. An empty
+  SRT stays on disk and is left out of the ffmpeg inputs, instead of being
+  mapped as a subtitle stream that is not there.
 - Variable-frame-rate captures that report a tick rate as `r_frame_rate`
   (Quest: `100000/1`) were put on a 100000 fps grid. The average frame rate is
   used for those.
