@@ -324,12 +324,12 @@ def broll_windows(blocks, dur, minlen=0.8, **kw):
     return windows_of(speech_gaps(blocks, dur, **kw), minlen)
 
 def select_broll(moments, windows, blocks, dur):
-    """Keep the speech-free windows instead of cutting them. With moments, each one keeps the whole window containing t, so a marked silent shot
-    stays whole instead of shrinking to a pre/post slice. With none, every window is a clip and setup chatter is left out. Rows match select_moments;
-    section and note are the caller's, and note on the row stays the reason an edge moved."""
+    """Keep the speech-free windows instead of cutting them. moments is None when no selection was asked for: every window is a clip and setup chatter
+    is left out. An empty list is a selection of nothing, not a request for every window. A moment keeps the whole window containing t, so a marked
+    silent shot stays whole instead of shrinking to a pre/post slice. Rows match select_moments; section and note are the caller's."""
     said = lambda x0, x1: " ".join(b["w"] for b in blocks if x0 <= (b["s"] + b["e"]) / 2 <= x1)  # speech a clip contains
     usable = [w for w in windows if w["hi"] - w["lo"] > 0.05]
-    if not moments: return [[w["lo"], w["hi"]] for w in usable], []
+    if moments is None: return [[w["lo"], w["hi"]] for w in usable], []
     rows = []
     for m in moments:
         t = float(m["t"])
@@ -387,7 +387,7 @@ def select_edl(a, raw, words, rms, fps):
     """--select / --broll: keep-segments around the wanted moments, or the speech-free windows. Returns (keep, cuts, sel); sel carries the per-moment
     rows, the speech map and caption words. The speech map is built from raw, the words as transcribed: vocabulary fixes merge several words into one
     span, which the per-word length cap would then cut short. words (vocabulary applied) only feed the captions."""
-    moments = []
+    moments = None  # None: no --select, so --broll keeps every window. A file that lists nothing is an empty selection, not that.
     if a.select:
         y = yaml.safe_load(Path(a.select).expanduser().read_text()) or []
         moments = y.get("moments", []) if isinstance(y, dict) else y
@@ -397,7 +397,7 @@ def select_edl(a, raw, words, rms, fps):
     gaps = speech_gaps(blocks, a.dur, a.gap, max(a.min_gap, 0.12), min(max(a.pad, MINPAD), MAXPAD) + hf, MAXPAD, MINPAD + hf, max(a.air, 0.0))
     windows = windows_of(gaps, a.pause) if a.broll else None
     if a.broll: clips, rows = select_broll(moments, windows, blocks, a.dur)
-    else: clips, rows = select_moments(moments, gaps, blocks, a.dur, a.pre, a.post, a.max_clip, max(JOIN, 2 * a.air))
+    else: clips, rows = select_moments(moments or [], gaps, blocks, a.dur, a.pre, a.post, a.max_clip, max(JOIN, 2 * a.air))
     keep = settle(clips, gaps, rms, a.snap, fps, a.dur)
     cuts, t0 = [], 0.0
     for s, e, _ in keep:

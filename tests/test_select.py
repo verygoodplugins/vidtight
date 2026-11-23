@@ -539,6 +539,22 @@ def test_a_broll_moment_keeps_the_whole_silent_window_not_a_pre_post_slice():
     assert row["status"] == "kept" and row["section"] == "chorus" and row["shot_note"] == "hold the wide shot"
 
 
+def test_broll_without_a_selection_keeps_every_window_and_an_empty_list_keeps_none():
+    windows = v.broll_windows([], DUR)
+    clips, rows = v.select_broll(None, windows, [], DUR)
+    assert clips == [[0.0, DUR]] and rows == []
+    assert v.select_broll([], windows, [], DUR) == ([], [])
+
+
+def test_an_empty_moments_file_with_broll_keeps_nothing(stub_media, monkeypatch, tmp_path):
+    for text in ("[]\n", "moments: []\n"):
+        out = run_select(monkeypatch, tmp_path, text, "--broll", "--snap", "0")
+        edl = json.loads((out / "edl.json").read_text())
+        assert edl["keep"] == [] and edl["select"] == []
+        assert json.loads((out / "shots.json").read_text()) == []
+        assert json.loads((out / "windows.json").read_text())  # the speech-free inventory is still written
+
+
 def test_broll_drops_a_moment_that_lands_in_speech():
     blocks, gaps = gaps_for(WORDS)
     clips, (row,) = v.select_broll([{"t": 10.5, "label": "inside the line"}], v.windows_of(gaps, 0.8), blocks, DUR)

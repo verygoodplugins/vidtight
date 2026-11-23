@@ -247,7 +247,7 @@ The first two numbers should be zero. If they aren't, a warning goes to stderr, 
 
 ### B-roll (`--broll`)
 
-Pause cutting treats a silent shot as dead air, so a 24 s hero with no speech (or only a little setup chatter) comes out a few seconds long. `--broll` reuses the speech map and does the opposite: it writes every speech-free gap of at least `--pause` seconds to `windows.json` (`start`, `end`, `duration`) and keeps those windows. A clip with no speech is one window, the whole file. Setup chatter is left out. The rendered edge sits on the usual pad inside the window, so it does not land on a word. With `--select`, a moment keeps the silent window it falls in, instead of a `--pre` / `--post` slice.
+Pause cutting treats a silent shot as dead air, so a 24 s hero with no speech (or only a little setup chatter) comes out a few seconds long. `--broll` reuses the speech map and does the opposite: it writes every speech-free gap of at least `--pause` seconds to `windows.json` (`start`, `end`, `duration`) and keeps those windows. A clip with no speech is one window, the whole file. Setup chatter is left out. The rendered edge sits on the usual pad inside the window, so it does not land on a word. With `--select`, a moment keeps the silent window it falls in, instead of a `--pre` / `--post` slice. An empty moments file keeps nothing; leave `--select` off to keep every window.
 
 `broll_windows(blocks, dur)` is the same step as a plain function.
 

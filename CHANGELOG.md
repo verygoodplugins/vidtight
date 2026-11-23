@@ -82,6 +82,9 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `--select` with an empty moments list and `--broll` keeps nothing. Omitting
+  `--select` is what keeps every speech-free window; an empty file is an empty
+  selection, not a request for all of them.
 - `--broll --render` with no captions no longer fails the final mux. An empty
   SRT stays on disk and is left out of the ffmpeg inputs, instead of being
   mapped as a subtitle stream that is not there.
